@@ -1129,16 +1129,38 @@ private final class SemayBusinessAnnotation: NSObject, MKAnnotation {
 }
 
 private final class MBTilesOverlay: MKTileOverlay {
-    private let path: String
+    private let dbPath: String
     private let minZoomLevel: Int
     private let maxZoomLevel: Int
+    private var db: OpaquePointer?
+    private let dbQueue = DispatchQueue(label: "semay.mbtiles.db", qos: .utility)
+    private let dbQueueKey = DispatchSpecificKey<UInt8>()
+    private let dbQueueValue: UInt8 = 1
 
     init(path: String, minZoom: Int, maxZoom: Int) {
-        self.path = path
+        self.dbPath = path
         self.minZoomLevel = minZoom
         self.maxZoomLevel = maxZoom
         super.init(urlTemplate: nil)
         tileSize = CGSize(width: 256, height: 256)
+
+        // Keep a single read-only connection open to avoid the overhead of opening SQLite per tile.
+        // Tile reads are serialized on dbQueue to keep sqlite usage simple and reliable.
+        dbQueue.setSpecific(key: dbQueueKey, value: dbQueueValue)
+        dbQueue.async { [weak self] in
+            self?.openDBIfNeeded()
+        }
+    }
+
+    deinit {
+        // Ensure we don't close the DB while a tile read is in-flight.
+        if DispatchQueue.getSpecific(key: dbQueueKey) == dbQueueValue {
+            closeDB()
+        } else {
+            dbQueue.sync {
+                closeDB()
+            }
+        }
     }
 
     override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
@@ -1147,19 +1169,39 @@ private final class MBTilesOverlay: MKTileOverlay {
             return
         }
 
-        DispatchQueue.global(qos: .utility).async {
+        dbQueue.async {
+            self.openDBIfNeeded()
             let data = self.readTile(z: path.z, x: path.x, y: path.y)
             result(data, nil)
         }
     }
 
+    private func closeDB() {
+        if let db {
+            sqlite3_close(db)
+        }
+        db = nil
+    }
+
+    private func openDBIfNeeded() {
+        precondition(DispatchQueue.getSpecific(key: dbQueueKey) == dbQueueValue)
+        if db != nil { return }
+        var conn: OpaquePointer?
+        if sqlite3_open_v2(dbPath, &conn, SQLITE_OPEN_READONLY, nil) == SQLITE_OK {
+            db = conn
+        } else {
+            if conn != nil {
+                sqlite3_close(conn)
+            }
+            db = nil
+        }
+    }
+
     private func readTile(z: Int, x: Int, y: Int) -> Data? {
-        var db: OpaquePointer?
-        guard sqlite3_open(path, &db) == SQLITE_OK else {
-            if db != nil { sqlite3_close(db) }
+        precondition(DispatchQueue.getSpecific(key: dbQueueKey) == dbQueueValue)
+        guard let db else {
             return nil
         }
-        defer { sqlite3_close(db) }
 
         let tmsY = (1 << z) - 1 - y
         let sql = "SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ? LIMIT 1"
