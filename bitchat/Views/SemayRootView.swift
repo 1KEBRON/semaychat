@@ -529,11 +529,12 @@ private struct SemayMapTabView: View {
             }
             .onAppear {
                 tileStore.refresh()
-                if tileStore.availablePack != nil {
-                    useOfflineTiles = true
-                    useOSMBaseMap = false
-                }
+                // Default UX: use native MapKit when online; fall back to offline tiles when offline.
+                updateBaseLayerForConnectivity()
                 fitMapToPins()
+            }
+            .onChange(of: reachability.isOnline) { _ in
+                updateBaseLayerForConnectivity()
             }
             .alert("Semay", isPresented: Binding(
                 get: { mapActionMessage != nil },
@@ -686,6 +687,19 @@ private struct SemayMapTabView: View {
         tileStore.selectPack(best)
     }
 
+    private func updateBaseLayerForConnectivity() {
+        // Keep the default map looking native whenever we can.
+        // Offline tiles are only used when offline (and a pack is installed).
+        if !reachability.isOnline, tileStore.availablePack != nil {
+            useOfflineTiles = true
+            useOSMBaseMap = false
+            autoSelectPackIfNeeded()
+        } else {
+            useOfflineTiles = false
+            useOSMBaseMap = false
+        }
+    }
+
     private func approvePin(_ pin: SemayMapPin) {
         if locationState.permissionState != .authorized {
             locationState.enableLocationChannels()
@@ -716,8 +730,8 @@ private struct SemayMapTabView: View {
         defer { installingCommunityPack = false }
         do {
             let installed = try await tileStore.installRecommendedPack()
-            useOfflineTiles = true
-            useOSMBaseMap = false
+            _ = installed
+            updateBaseLayerForConnectivity()
             tileImportMessage = "Installed \(installed.name)."
         } catch {
             tileImportMessage = error.localizedDescription
@@ -929,7 +943,7 @@ private struct TilePackInfoSheet: View {
         tileStore.refresh()
         if tileStore.availablePack == nil {
             useOfflineTiles = false
-            useOSMBaseMap = true
+            useOSMBaseMap = false
         }
     }
 
@@ -1467,9 +1481,9 @@ private struct SemayExploreSheet: View {
     private var librarySection: some View {
         Section {
             if libraryStore.packs.isEmpty {
-                Text("No library packs installed.")
+                Text("Library not installed.")
                     .foregroundStyle(.secondary)
-                Button(installingLibraryPack ? "Installing..." : "Install Library Pack") {
+                Button(installingLibraryPack ? "Installing..." : "Install Library") {
                     Task {
                         installingLibraryPack = true
                         libraryError = nil
