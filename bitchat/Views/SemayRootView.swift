@@ -1753,6 +1753,8 @@ private struct SemayBusinessTabView: View {
     @State private var editingBusiness: BusinessProfile?
     @State private var showQRScanner = false
     @State private var settlementPromise: PromiseNote?
+    @State private var promiseQR: PromiseNote?
+    @State private var promiseRespond: PromiseNote?
 
     var body: some View {
         NavigationStack {
@@ -1820,21 +1822,36 @@ private struct SemayBusinessTabView: View {
                         Text("No promises yet.")
                     } else {
                         ForEach(dataStore.promises) { promise in
+                            let business = dataStore.businesses.first(where: { $0.businessID == promise.merchantID })
+                            let isMerchantOwner = (business?.ownerPubkey.lowercased() == dataStore.currentUserPubkey())
+                            let isPayer = (promise.payerPubkey.lowercased() == dataStore.currentUserPubkey())
+
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("\(promise.amountMsat / 1000) sats")
                                     .font(.headline)
+                                if let business {
+                                    Text("To: \(business.name) • \(business.category)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("To: \(promise.merchantID)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Text("\(promise.status.rawValue.capitalized) • Expires \(Date(timeIntervalSince1970: TimeInterval(promise.expiresAt)).formatted())")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 HStack {
-                                    if promise.status == .pending {
-                                        Button("Accept") {
-                                            _ = dataStore.updatePromiseStatus(promise.promiseID, status: .accepted)
+                                    if isPayer {
+                                        Button("Show QR") {
+                                            promiseQR = promise
                                         }
-                                        .buttonStyle(.borderedProminent)
+                                        .buttonStyle(.bordered)
+                                    }
 
-                                        Button("Reject") {
-                                            _ = dataStore.updatePromiseStatus(promise.promiseID, status: .rejected)
+                                    if isMerchantOwner, promise.status == .pending || promise.status == .accepted || promise.status == .rejected {
+                                        Button("Respond") {
+                                            promiseRespond = promise
                                         }
                                         .buttonStyle(.bordered)
                                     }
@@ -1883,6 +1900,14 @@ private struct SemayBusinessTabView: View {
             }
             .sheet(item: $settlementPromise) { promise in
                 SemaySettlementSheet(promise: promise)
+                    .environmentObject(dataStore)
+            }
+            .sheet(item: $promiseQR) { promise in
+                SemayPromiseQRSheet(promise: promise)
+                    .environmentObject(dataStore)
+            }
+            .sheet(item: $promiseRespond) { promise in
+                SemayPromiseRespondSheet(promise: promise)
                     .environmentObject(dataStore)
             }
             #if os(iOS)

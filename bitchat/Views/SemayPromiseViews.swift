@@ -388,7 +388,7 @@ struct SemayPromiseEnvelopeSheet: View {
     private func short(_ s: String) -> String {
         let cleaned = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.count <= 14 { return cleaned }
-        return "\(cleaned.prefix(6))…\(cleaned.suffix(6))"
+        return "\(cleaned.prefix(6))...\(cleaned.suffix(6))"
     }
 }
 
@@ -494,6 +494,222 @@ struct SemaySettlementSheet: View {
     private func short(_ s: String) -> String {
         let cleaned = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.count <= 14 { return cleaned }
-        return "\(cleaned.prefix(6))…\(cleaned.suffix(6))"
+        return "\(cleaned.prefix(6))...\(cleaned.suffix(6))"
+    }
+}
+
+// MARK: - Promise QR (Re-Show)
+
+struct SemayPromiseQRSheet: View {
+    let promise: PromiseNote
+
+    @EnvironmentObject private var dataStore: SemayDataStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var urlString: String?
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Promise") {
+                    Text("Amount: \(promise.amountMsat / 1000) sats")
+                    Text("Status: \(promise.status.rawValue.capitalized)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Expires: \(Date(timeIntervalSince1970: TimeInterval(promise.expiresAt)).formatted())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let urlString {
+                    Section("Promise QR") {
+                        QRCodeImage(data: urlString, size: 240)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        Text(urlString)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                        ShareLink(item: urlString) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                } else {
+                    Section {
+                        Text("Generating QR...")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error {
+                    Section {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle("Promise QR")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onAppear {
+                build()
+            }
+        }
+    }
+
+    private func build() {
+        error = nil
+        urlString = nil
+
+        let me = dataStore.currentUserPubkey()
+        guard me == promise.payerPubkey.lowercased() else {
+            error = "Only the payer can share the promise QR."
+            return
+        }
+
+        guard let envelope = dataStore.makePromiseCreateEnvelope(for: promise),
+              let data = try? JSONEncoder().encode(envelope) else {
+            error = "Failed to build promise QR."
+            return
+        }
+        urlString = "semay://promise/\(Base64URL.encode(data))"
+    }
+}
+
+// MARK: - Merchant Response QR (Accept/Reject)
+
+struct SemayPromiseRespondSheet: View {
+    let promise: PromiseNote
+
+    @EnvironmentObject private var dataStore: SemayDataStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var responseURLString: String?
+    @State private var error: String?
+
+    private var business: BusinessProfile? {
+        dataStore.businesses.first(where: { $0.businessID == promise.merchantID })
+    }
+
+    private var isMerchantOwner: Bool {
+        business?.ownerPubkey.lowercased() == dataStore.currentUserPubkey()
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Merchant") {
+                    if let business {
+                        Text(business.name)
+                            .font(.headline)
+                        Text("\(business.category) • \(business.eAddress)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Merchant ID: \(promise.merchantID)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Amount: \(promise.amountMsat / 1000) sats")
+                    Text("Expires: \(Date(timeIntervalSince1970: TimeInterval(promise.expiresAt)).formatted())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Response") {
+                    Text("Current: \(promise.status.rawValue.capitalized)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if promise.status == .pending {
+                        HStack {
+                            Button("Accept") {
+                                respond(status: .accepted)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!isMerchantOwner)
+
+                            Button("Reject") {
+                                respond(status: .rejected)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!isMerchantOwner)
+                        }
+                    } else if promise.status == .accepted || promise.status == .rejected {
+                        Button("Show Response QR") {
+                            respond(status: promise.status)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!isMerchantOwner)
+                    } else {
+                        Text("No response available for this state.")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if !isMerchantOwner {
+                        Text("This device does not control the target business profile, so responding is disabled.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let responseURLString {
+                    Section("Response QR") {
+                        QRCodeImage(data: responseURLString, size: 240)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        Text(responseURLString)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                        ShareLink(item: responseURLString) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                }
+
+                if let error {
+                    Section {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle("Respond")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func respond(status: PromiseStatus) {
+        error = nil
+        responseURLString = nil
+
+        guard isMerchantOwner else {
+            error = "Only the business owner can respond."
+            return
+        }
+        guard status == .accepted || status == .rejected else {
+            error = "Invalid response state."
+            return
+        }
+
+        _ = dataStore.updatePromiseStatus(promise.promiseID, status: status)
+
+        guard let env = dataStore.makePromiseResponseEnvelope(
+            promiseID: promise.promiseID,
+            merchantID: promise.merchantID,
+            status: status
+        ), let data = try? JSONEncoder().encode(env) else {
+            error = "Failed to build response QR."
+            return
+        }
+
+        responseURLString = "semay://promise-response/\(Base64URL.encode(data))"
     }
 }
