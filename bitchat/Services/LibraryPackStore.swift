@@ -396,7 +396,7 @@ final class LibraryPackStore: ObservableObject {
         throw NSError(
             domain: "LibraryPackStore",
             code: 30,
-            userInfo: [NSLocalizedDescriptionKey: "No reachable library source found. Connect to the internet and try again."]
+            userInfo: [NSLocalizedDescriptionKey: "Library packs aren't available right now. You can keep using Semay without the library, or connect to a Semay node and try again."]
         )
     }
 
