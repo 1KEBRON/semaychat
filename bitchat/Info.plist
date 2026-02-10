@@ -24,6 +24,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>bitchat</string>
+				<string>semay</string>
 			</array>
 		</dict>
 	</array>

@@ -39,6 +39,7 @@ struct SemayRootView: View {
     @EnvironmentObject var viewModel: ChatViewModel
     @StateObject private var seedService = SeedPhraseService.shared
     @StateObject private var dataStore = SemayDataStore.shared
+    @StateObject private var navigation = SemayNavigationState.shared
 
     @State private var selectedTab: Tab = .map
     @State private var showOnboarding = false
@@ -85,10 +86,37 @@ struct SemayRootView: View {
             dataStore.refreshAll()
             showOnboarding = seedService.needsOnboarding()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .semayDeepLinkURL)) { notification in
+            guard let url = notification.object as? URL else { return }
+            handleSemayDeepLink(url)
+        }
         .sheet(isPresented: $showOnboarding) {
             SeedBackupOnboardingView(isPresented: $showOnboarding)
                 .interactiveDismissDisabled(true)
                 .environmentObject(seedService)
+        }
+    }
+
+    private func handleSemayDeepLink(_ url: URL) {
+        guard url.scheme == "semay" else { return }
+
+        let host = (url.host ?? "").lowercased()
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard let first = parts.first, !first.isEmpty else { return }
+
+        switch host {
+        case "business":
+            navigation.selectedPinID = nil
+            navigation.selectedBusinessID = first
+            navigation.pendingFocus = true
+            selectedTab = .map
+        case "pin", "place":
+            navigation.selectedBusinessID = nil
+            navigation.selectedPinID = first
+            navigation.pendingFocus = true
+            selectedTab = .map
+        default:
+            break
         }
     }
 }
@@ -155,6 +183,7 @@ private struct SemayMapTabView: View {
     @StateObject private var tileStore = OfflineTileStore.shared
     @StateObject private var libraryStore = LibraryPackStore.shared
     @StateObject private var reachability = NetworkReachabilityService.shared
+    @ObservedObject private var navigation = SemayNavigationState.shared
     @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
 
     @State private var region = MKCoordinateRegion(
@@ -162,8 +191,6 @@ private struct SemayMapTabView: View {
         span: MKCoordinateSpan(latitudeDelta: 2.6, longitudeDelta: 2.6)
     )
     @State private var showAddPin = false
-    @State private var selectedPinID: String?
-    @State private var selectedBusinessID: String?
     @State private var useOSMBaseMap = false
     @State private var useOfflineTiles = false
     @State private var showTileImporter = false
@@ -180,9 +207,15 @@ private struct SemayMapTabView: View {
                 SemayMapView(
                     region: $region,
                     pins: dataStore.pins,
-                    selectedPinID: $selectedPinID,
+                    selectedPinID: Binding(
+                        get: { navigation.selectedPinID },
+                        set: { navigation.selectedPinID = $0 }
+                    ),
                     businesses: dataStore.businesses,
-                    selectedBusinessID: $selectedBusinessID,
+                    selectedBusinessID: Binding(
+                        get: { navigation.selectedBusinessID },
+                        set: { navigation.selectedBusinessID = $0 }
+                    ),
                     useOSMBaseMap: $useOSMBaseMap,
                     offlinePack: tileStore.availablePack,
                     useOfflineTiles: $useOfflineTiles
@@ -192,7 +225,7 @@ private struct SemayMapTabView: View {
                 Map(coordinateRegion: $region, annotationItems: dataStore.pins) { pin in
                     MapAnnotation(coordinate: CLLocationCoordinate2D(latitude: pin.latitude, longitude: pin.longitude)) {
                         Button {
-                            selectedPinID = pin.pinID
+                            navigation.selectedPinID = pin.pinID
                         } label: {
                             VStack(spacing: 4) {
                                 Image(systemName: pin.isVisible ? "mappin.circle.fill" : "mappin.slash.circle.fill")
@@ -339,7 +372,7 @@ private struct SemayMapTabView: View {
                             .disabled(selected.latitude == 0 && selected.longitude == 0)
                             Spacer()
                             Button("Close") {
-                                selectedBusinessID = nil
+                                navigation.selectedBusinessID = nil
                             }
                             .buttonStyle(.bordered)
                         }
@@ -384,7 +417,7 @@ private struct SemayMapTabView: View {
                             .buttonStyle(.bordered)
                             Spacer()
                             Button("Close") {
-                                selectedPinID = nil
+                                navigation.selectedPinID = nil
                             }
                             .buttonStyle(.bordered)
                         }
@@ -450,8 +483,14 @@ private struct SemayMapTabView: View {
                     pins: dataStore.pins,
                     businesses: dataStore.businesses,
                     libraryStore: libraryStore,
-                    selectedPinID: $selectedPinID,
-                    selectedBusinessID: $selectedBusinessID
+                    selectedPinID: Binding(
+                        get: { navigation.selectedPinID },
+                        set: { navigation.selectedPinID = $0 }
+                    ),
+                    selectedBusinessID: Binding(
+                        get: { navigation.selectedBusinessID },
+                        set: { navigation.selectedBusinessID = $0 }
+                    )
                 )
             }
             .onAppear {
@@ -513,19 +552,45 @@ private struct SemayMapTabView: View {
                 autoSelectPackIfNeeded()
             }
             .onChange(of: dataStore.pins.count) { _ in
-                fitMapToPins()
+                if !navigation.pendingFocus {
+                    fitMapToPins()
+                }
+            }
+            .onChange(of: navigation.selectedBusinessID) { _ in
+                guard navigation.pendingFocus else { return }
+                guard let id = navigation.selectedBusinessID else { return }
+                if let b = dataStore.businesses.first(where: { $0.businessID == id }) {
+                    centerMap(latitude: b.latitude, longitude: b.longitude, zoomDelta: 0.12)
+                    navigation.pendingFocus = false
+                }
+            }
+            .onChange(of: navigation.selectedPinID) { _ in
+                guard navigation.pendingFocus else { return }
+                guard let id = navigation.selectedPinID else { return }
+                if let pin = dataStore.pins.first(where: { $0.pinID == id }) {
+                    centerMap(latitude: pin.latitude, longitude: pin.longitude, zoomDelta: 0.12)
+                    navigation.pendingFocus = false
+                }
+            }
+            .onChange(of: dataStore.businesses.count) { _ in
+                guard navigation.pendingFocus else { return }
+                if let id = navigation.selectedBusinessID,
+                   let b = dataStore.businesses.first(where: { $0.businessID == id }) {
+                    centerMap(latitude: b.latitude, longitude: b.longitude, zoomDelta: 0.12)
+                    navigation.pendingFocus = false
+                }
             }
         }
     }
 
     private var selectedPin: SemayMapPin? {
-        guard let selectedPinID else { return nil }
-        return dataStore.pins.first(where: { $0.pinID == selectedPinID })
+        guard let id = navigation.selectedPinID else { return nil }
+        return dataStore.pins.first(where: { $0.pinID == id })
     }
 
     private var selectedBusiness: BusinessProfile? {
-        guard let selectedBusinessID else { return nil }
-        return dataStore.businesses.first(where: { $0.businessID == selectedBusinessID })
+        guard let id = navigation.selectedBusinessID else { return nil }
+        return dataStore.businesses.first(where: { $0.businessID == id })
     }
 
     private func centerMap(latitude: Double, longitude: Double, zoomDelta: Double) {
@@ -1427,6 +1492,7 @@ private struct SemayBusinessTabView: View {
     @Environment(\.openURL) private var openURL
 
     @State private var showRegisterBusiness = false
+    @State private var qrBusiness: BusinessProfile?
 
     var body: some View {
         NavigationStack {
@@ -1462,6 +1528,18 @@ private struct SemayBusinessTabView: View {
                                     }
                                     Button("Directions") {
                                         openDirections(latitude: business.latitude, longitude: business.longitude, name: business.name)
+                                    }
+                                    .buttonStyle(.bordered)
+
+                                    ShareLink(item: business.qrPayload) {
+                                        Label("Share", systemImage: "square.and.arrow.up")
+                                    }
+                                    .buttonStyle(.bordered)
+
+                                    Button {
+                                        qrBusiness = business
+                                    } label: {
+                                        Label("QR", systemImage: "qrcode")
                                     }
                                     .buttonStyle(.bordered)
 
@@ -1537,6 +1615,9 @@ private struct SemayBusinessTabView: View {
                 RegisterBusinessSheet(isPresented: $showRegisterBusiness)
                     .environmentObject(dataStore)
             }
+            .sheet(item: $qrBusiness) { business in
+                SemayBusinessQRSheet(business: business)
+            }
         }
     }
 
@@ -1553,6 +1634,49 @@ private struct SemayBusinessTabView: View {
         let q = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         if let url = URL(string: "http://maps.apple.com/?ll=\(latitude),\(longitude)&q=\(q)") {
             openURL(url)
+        }
+    }
+}
+
+private struct SemayBusinessQRSheet: View {
+    let business: BusinessProfile
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 14) {
+                Text(business.name)
+                    .font(.headline)
+
+                QRCodeImage(data: business.qrPayload, size: 240)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(business.category) • \(business.eAddress)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if !business.plusCode.isEmpty {
+                        Text(business.plusCode)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(business.qrPayload)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 16)
+
+                Spacer()
+            }
+            .padding(.top, 16)
+            .navigationTitle("Share Business")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
 }

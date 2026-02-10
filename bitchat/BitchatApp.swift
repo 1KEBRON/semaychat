@@ -143,6 +143,12 @@ struct BitchatApp: App {
         if url.scheme == "bitchat" && url.host == "share" {
             // Handle shared content
             checkForSharedContent()
+            return
+        }
+
+        if url.scheme == "semay" {
+            NotificationCenter.default.post(name: .semayDeepLinkURL, object: url)
+            return
         }
     }
     
