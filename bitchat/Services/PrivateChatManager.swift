@@ -249,6 +249,9 @@ final class PrivateChatManager: ObservableObject {
     // MARK: - Private Methods
     
     private func sendReadReceipt(for message: BitchatMessage) {
+        guard UserDefaults.standard.bool(forKey: "semay.read_receipts_enabled") else {
+            return
+        }
         guard !sentReadReceipts.contains(message.id),
               let senderPeerID = message.senderPeerID else {
             return

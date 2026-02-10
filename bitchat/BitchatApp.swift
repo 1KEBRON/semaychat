@@ -46,7 +46,7 @@ struct BitchatApp: App {
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            SemayRootView()
                 .environmentObject(chatViewModel)
                 .onAppear {
                     NotificationDelegate.shared.chatViewModel = chatViewModel
@@ -66,6 +66,7 @@ struct BitchatApp: App {
                     
                     // Start presence service (will wait for Tor readiness)
                     GeohashPresenceService.shared.start()
+                    SemayEnvelopeSyncService.shared.start()
 
                     // Check for shared content
                     checkForSharedContent()
@@ -87,6 +88,7 @@ struct BitchatApp: App {
                         }
                         // Proactively disconnect Nostr to avoid spurious socket errors while Tor is down
                         NostrRelayManager.shared.disconnect()
+                        SemayEnvelopeSyncService.shared.stop()
                         didEnterBackground = true
                     case .active:
                         // Restart services when becoming active
@@ -113,6 +115,7 @@ struct BitchatApp: App {
                                 }
                             }
                         }
+                        SemayEnvelopeSyncService.shared.start()
                         checkForSharedContent()
                     case .inactive:
                         break
@@ -278,4 +281,3 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         completionHandler([.banner, .sound])
     }
 }
-

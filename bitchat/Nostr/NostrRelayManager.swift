@@ -77,6 +77,11 @@ final class NostrRelayManager: ObservableObject {
     private let maxBackoffInterval: TimeInterval = TransportConfig.nostrRelayMaxBackoffSeconds
     private let backoffMultiplier: Double = TransportConfig.nostrRelayBackoffMultiplier
     private let maxReconnectAttempts = TransportConfig.nostrRelayMaxReconnectAttempts
+    private let maxInboundMessageBytes = 262_144
+    private let maxInboundContentBytes = 65_536
+    private let maxInboundTags = 64
+    private let maxInboundTagElements = 16
+    private let maxInboundSubscriptionIDLength = 128
     
     // Bump generation to invalidate scheduled reconnects when we reset/disconnect
     private var connectionGeneration: Int = 0
@@ -502,10 +507,27 @@ final class NostrRelayManager: ObservableObject {
             switch result {
             case .success(let message):
                 // Parse off-main to reduce UI jank, then hop back for state updates
+                let maxInboundMessageBytes = self.maxInboundMessageBytes
+                let maxInboundContentBytes = self.maxInboundContentBytes
+                let maxInboundTags = self.maxInboundTags
+                let maxInboundTagElements = self.maxInboundTagElements
+                let maxInboundSubscriptionIDLength = self.maxInboundSubscriptionIDLength
                 Task.detached(priority: .utility) {
-                    guard let parsed = ParsedInbound(message) else { return }
+                    let outcome = ParsedInbound.parse(
+                        message,
+                        maxMessageBytes: maxInboundMessageBytes,
+                        maxContentBytes: maxInboundContentBytes,
+                        maxTags: maxInboundTags,
+                        maxTagElements: maxInboundTagElements,
+                        maxSubscriptionIDLength: maxInboundSubscriptionIDLength
+                    )
                     await MainActor.run {
-                        NostrRelayManager.shared.handleParsedMessage(parsed, from: relayUrl)
+                        switch outcome {
+                        case .accepted(let parsed):
+                            NostrRelayManager.shared.handleParsedMessage(parsed, from: relayUrl)
+                        case .rejected(let rejection):
+                            NostrRelayManager.shared.logRejectedInbound(rejection, relayUrl: relayUrl)
+                        }
                     }
                 }
                 
@@ -566,6 +588,16 @@ final class NostrRelayManager: ObservableObject {
             }
         case .notice:
             break
+        }
+    }
+
+    private func logRejectedInbound(_ rejection: InboundRejection, relayUrl: String) {
+        let message = "Nostr inbound rejected [\(rejection.category.rawValue)] relay=\(relayUrl) reason=\(rejection.reason)"
+        switch rejection.category {
+        case .protocolInvalid, .policyRejected:
+            SecureLogger.warning(message, category: .session)
+        case .transportFailed:
+            SecureLogger.error(message, category: .session)
         }
     }
     
@@ -745,54 +777,136 @@ final class NostrRelayManager: ObservableObject {
 
 // MARK: - Off-main inbound parsing helpers (file scope, non-isolated)
 
+private enum InboundRejectionCategory: String {
+    case protocolInvalid = "protocol-invalid"
+    case policyRejected = "policy-rejected"
+    case transportFailed = "transport-failed"
+}
+
+private struct InboundRejection {
+    let category: InboundRejectionCategory
+    let reason: String
+}
+
+private enum ParsedInboundOutcome {
+    case accepted(ParsedInbound)
+    case rejected(InboundRejection)
+}
+
 private enum ParsedInbound {
     case event(subId: String, event: NostrEvent)
     case ok(eventId: String, success: Bool, reason: String)
     case eose(subscriptionId: String)
     case notice(String)
-    
-    init?(_ message: URLSessionWebSocketTask.Message) {
-        guard let data = message.data,
-              let array = try? JSONSerialization.jsonObject(with: data) as? [Any],
-              array.count >= 2,
-              let type = array[0] as? String else {
-            return nil
+
+    static func parse(
+        _ message: URLSessionWebSocketTask.Message,
+        maxMessageBytes: Int,
+        maxContentBytes: Int,
+        maxTags: Int,
+        maxTagElements: Int,
+        maxSubscriptionIDLength: Int
+    ) -> ParsedInboundOutcome {
+        guard let data = message.data else {
+            return .rejected(
+                InboundRejection(
+                    category: .transportFailed,
+                    reason: "unsupported-websocket-frame"
+                )
+            )
+        }
+
+        if data.count > maxMessageBytes {
+            return .rejected(
+                InboundRejection(
+                    category: .policyRejected,
+                    reason: "payload-too-large-\(data.count)"
+                )
+            )
+        }
+
+        guard let array = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
+            return .rejected(
+                InboundRejection(
+                    category: .protocolInvalid,
+                    reason: "invalid-json-array"
+                )
+            )
+        }
+        guard array.count >= 2 else {
+            return .rejected(
+                InboundRejection(
+                    category: .protocolInvalid,
+                    reason: "array-too-short"
+                )
+            )
+        }
+        guard let type = array[0] as? String else {
+            return .rejected(
+                InboundRejection(
+                    category: .protocolInvalid,
+                    reason: "missing-type-discriminator"
+                )
+            )
         }
 
         switch type {
         case "EVENT":
-            if array.count >= 3,
-               let subId = array[1] as? String,
-               let eventDict = array[2] as? [String: Any],
-               let event = try? NostrEvent(from: eventDict),
-               event.isValidSignature() {
-                self = .event(subId: subId, event: event)
-                return
+            guard array.count >= 3 else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "event-missing-fields"))
             }
-            return nil
+            guard let subId = array[1] as? String,
+                  !subId.isEmpty,
+                  subId.count <= maxSubscriptionIDLength else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "invalid-subscription-id"))
+            }
+            guard let eventDict = array[2] as? [String: Any] else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "invalid-event-object"))
+            }
+            guard let event = try? NostrEvent(from: eventDict) else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "event-decode-failed"))
+            }
+            guard event.content.utf8.count <= maxContentBytes else {
+                return .rejected(InboundRejection(category: .policyRejected, reason: "event-content-too-large"))
+            }
+            guard event.tags.count <= maxTags else {
+                return .rejected(InboundRejection(category: .policyRejected, reason: "event-tag-count-exceeded"))
+            }
+            guard event.tags.allSatisfy({ $0.count <= maxTagElements }) else {
+                return .rejected(InboundRejection(category: .policyRejected, reason: "event-tag-depth-exceeded"))
+            }
+            guard event.isValidSignature() else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "invalid-signature"))
+            }
+            return .accepted(.event(subId: subId, event: event))
+
         case "EOSE":
-            if let subId = array[1] as? String {
-                self = .eose(subscriptionId: subId)
-                return
+            guard let subId = array[1] as? String,
+                  !subId.isEmpty,
+                  subId.count <= maxSubscriptionIDLength else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "invalid-eose-subscription-id"))
             }
-            return nil
+            return .accepted(.eose(subscriptionId: subId))
+
         case "OK":
-            if array.count >= 3,
-               let eventId = array[1] as? String,
-               let success = array[2] as? Bool {
-                let reason = array.count >= 4 ? (array[3] as? String ?? "no reason given") : "no reason given"
-                self = .ok(eventId: eventId, success: success, reason: reason)
-                return
+            guard array.count >= 3,
+                  let eventId = array[1] as? String,
+                  eventId.count == 64,
+                  eventId.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil,
+                  let success = array[2] as? Bool else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "invalid-ok-frame"))
             }
-            return nil
+            let reason = array.count >= 4 ? (array[3] as? String ?? "no reason given") : "no reason given"
+            return .accepted(.ok(eventId: eventId, success: success, reason: reason))
+
         case "NOTICE":
-            if array.count >= 2, let msg = array[1] as? String {
-                self = .notice(msg)
-                return
+            guard array.count >= 2, let msg = array[1] as? String else {
+                return .rejected(InboundRejection(category: .protocolInvalid, reason: "invalid-notice-frame"))
             }
-            return nil
+            return .accepted(.notice(msg))
+
         default:
-            return nil
+            return .rejected(InboundRejection(category: .policyRejected, reason: "unsupported-frame-type-\(type)"))
         }
     }
 }

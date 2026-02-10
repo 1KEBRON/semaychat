@@ -51,6 +51,12 @@ final class GeohashPresenceService: ObservableObject {
     
     /// Start the service (safe to call multiple times)
     func start() {
+        guard SafetyModeService.shared.presenceEnabled else {
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            SecureLogger.info("Presence: disabled by safe mode", category: .session)
+            return
+        }
         SecureLogger.info("Presence: service starting...", category: .session)
         scheduleNextHeartbeat()
     }
@@ -70,9 +76,25 @@ final class GeohashPresenceService: ObservableObject {
                 self?.handleConnectivityChange()
             }
             .store(in: &subscriptions)
+
+        SafetyModeService.shared.$presenceEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                guard let self = self else { return }
+                if enabled {
+                    self.scheduleNextHeartbeat()
+                } else {
+                    self.heartbeatTimer?.invalidate()
+                    self.heartbeatTimer = nil
+                }
+            }
+            .store(in: &subscriptions)
     }
 
     private func handleLocationChange() {
+        guard SafetyModeService.shared.presenceEnabled else {
+            return
+        }
         // When location changes, we trigger an immediate (but slightly delayed) heartbeat
         // to announce presence in the new zone, then reset the loop.
         SecureLogger.debug("Presence: location changed, scheduling update", category: .session)
@@ -87,6 +109,9 @@ final class GeohashPresenceService: ObservableObject {
     }
     
     private func handleConnectivityChange() {
+        guard SafetyModeService.shared.presenceEnabled else {
+            return
+        }
         SecureLogger.debug("Presence: connectivity restored, triggering heartbeat", category: .session)
         // If we were waiting for network, do it now
         if heartbeatTimer == nil || !heartbeatTimer!.isValid {
@@ -95,6 +120,11 @@ final class GeohashPresenceService: ObservableObject {
     }
 
     private func scheduleNextHeartbeat() {
+        guard SafetyModeService.shared.presenceEnabled else {
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            return
+        }
         heartbeatTimer?.invalidate()
         let interval = TimeInterval.random(in: loopMinInterval...loopMaxInterval)
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
@@ -105,6 +135,11 @@ final class GeohashPresenceService: ObservableObject {
     }
 
     private func performHeartbeat() {
+        guard SafetyModeService.shared.presenceEnabled else {
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            return
+        }
         // Always schedule next loop first ensures continuity even if this one fails/skips
         defer { scheduleNextHeartbeat() }
 

@@ -38,7 +38,8 @@ let package = Package(
                 "ViewModels/Extensions/README.md"
             ],
             resources: [
-                .process("Localizable.xcstrings")
+                .process("Localizable.xcstrings"),
+                .process("Resources")
             ]
         ),
         .testTarget(
