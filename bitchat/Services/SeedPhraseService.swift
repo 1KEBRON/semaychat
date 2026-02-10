@@ -57,6 +57,51 @@ final class SeedPhraseService: ObservableObject {
         UserDefaults.standard.set(true, forKey: backupFlagKey)
     }
 
+    func restoreFromPhrase(_ rawPhrase: String) throws {
+        let parts = rawPhrase
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+
+        guard parts.count == 12 else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Seed phrase must be 12 words."]
+            )
+        }
+
+        let wordSet = Set(words)
+        for word in parts {
+            if !wordSet.contains(word) {
+                throw NSError(
+                    domain: "SeedPhraseService",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid word: \(word)"]
+                )
+            }
+        }
+
+        guard Self.isValidBIP39Checksum(words: parts, wordlist: words) else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Seed phrase checksum is invalid."]
+            )
+        }
+
+        let normalized = parts.joined(separator: " ")
+        keychain.save(
+            key: phraseKey,
+            data: Data(normalized.utf8),
+            service: service,
+            accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+
+        completeBackup()
+    }
+
     func resetBackupFlagForTesting() {
         hasCompletedBackup = false
         UserDefaults.standard.set(false, forKey: backupFlagKey)
@@ -140,6 +185,50 @@ final class SeedPhraseService: ObservableObject {
 
         // Last resort deterministic placeholder list.
         return (0..<2048).map { "word\($0)" }
+    }
+
+    private static func isValidBIP39Checksum(words mnemonic: [String], wordlist: [String]) -> Bool {
+        guard mnemonic.count == 12 else { return false }
+
+        var indexByWord: [String: Int] = [:]
+        indexByWord.reserveCapacity(wordlist.count)
+        for (idx, word) in wordlist.enumerated() {
+            indexByWord[word] = idx
+        }
+
+        var bits: [UInt8] = []
+        bits.reserveCapacity(12 * 11)
+        for word in mnemonic {
+            guard let index = indexByWord[word] else { return false }
+            for shift in stride(from: 10, through: 0, by: -1) {
+                bits.append(UInt8((index >> shift) & 1))
+            }
+        }
+
+        // For 12 words: 128 bits entropy + 4 bits checksum = 132 bits.
+        guard bits.count == 132 else { return false }
+        let entropyBits = Array(bits[0..<128])
+        let checksumBits = Array(bits[128..<132])
+
+        var entropy = Data(count: 16)
+        for byteIndex in 0..<16 {
+            var value: UInt8 = 0
+            for bitIndex in 0..<8 {
+                value = (value << 1) | entropyBits[byteIndex * 8 + bitIndex]
+            }
+            entropy[byteIndex] = value
+        }
+
+        let checksumByte = SHA256.hash(data: entropy).withUnsafeBytes { raw -> UInt8 in
+            raw.bindMemory(to: UInt8.self).baseAddress!.pointee
+        }
+        let expected: [UInt8] = [
+            UInt8((checksumByte >> 7) & 1),
+            UInt8((checksumByte >> 6) & 1),
+            UInt8((checksumByte >> 5) & 1),
+            UInt8((checksumByte >> 4) & 1),
+        ]
+        return expected == checksumBits
     }
 }
 

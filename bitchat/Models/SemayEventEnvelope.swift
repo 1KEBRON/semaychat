@@ -1,4 +1,5 @@
 import Foundation
+import P256K
 
 /// Transport-agnostic envelope for Semay mutating events.
 struct SemayEventEnvelope: Codable, Identifiable, Equatable {
@@ -39,6 +40,32 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
 
     var id: String { eventID }
 
+    private struct SigningPayload: Codable {
+        let schemaVersion: String
+        let eventID: String
+        let eventType: EventType
+        let entityID: String
+        let authorPubkey: String
+        let createdAt: Int
+        let lamportClock: UInt64
+        let expiresAt: Int?
+        let payloadHash: String
+        let payload: [String: String]
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case eventID = "event_id"
+            case eventType = "event_type"
+            case entityID = "entity_id"
+            case authorPubkey = "author_pubkey"
+            case createdAt = "created_at"
+            case lamportClock = "lamport_clock"
+            case expiresAt = "expires_at"
+            case payloadHash = "payload_hash"
+            case payload
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case eventID = "event_id"
@@ -57,21 +84,24 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         eventType: EventType,
         entityID: String,
         authorPubkey: String,
+        eventID: String = UUID().uuidString.lowercased(),
+        createdAt: Int = Int(Date().timeIntervalSince1970),
         lamportClock: UInt64,
         expiresAt: Int? = nil,
         payload: [String: String],
+        payloadHash: String? = nil,
         signature: String
     ) {
         self.schemaVersion = "1.0"
-        self.eventID = UUID().uuidString.lowercased()
+        self.eventID = eventID
         self.eventType = eventType
         self.entityID = entityID
         self.authorPubkey = authorPubkey
-        self.createdAt = Int(Date().timeIntervalSince1970)
+        self.createdAt = createdAt
         self.lamportClock = lamportClock
         self.expiresAt = expiresAt
         self.payload = payload
-        self.payloadHash = Self.canonicalPayloadHash(payload)
+        self.payloadHash = payloadHash ?? Self.canonicalPayloadHash(payload)
         self.signature = signature
     }
 
@@ -85,7 +115,8 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         guard Self.isValidHex(payloadHash, expectedLength: 64) else {
             return ValidationFailure(category: .protocolInvalid, reason: "invalid-payload-hash")
         }
-        guard Self.isValidHex(signature, expectedLength: 64) else {
+        guard Self.isValidHex(signature, expectedLength: nil),
+              signature.count == 64 || signature.count == 128 else {
             return ValidationFailure(category: .protocolInvalid, reason: "invalid-signature")
         }
         if let expiry = expiresAt, expiry < now {
@@ -95,11 +126,79 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         guard recomputed == payloadHash else {
             return ValidationFailure(category: .protocolInvalid, reason: "payload-hash-mismatch")
         }
-        let expectedSignature = Self.pseudoSign(payloadHash: payloadHash, authorPubkey: authorPubkey)
-        guard signature.lowercased() == expectedSignature.lowercased() else {
-            return ValidationFailure(category: .protocolInvalid, reason: "signature-mismatch")
+
+        if signature.count == 128 {
+            guard isValidSchnorrSignature() else {
+                return ValidationFailure(category: .protocolInvalid, reason: "signature-mismatch")
+            }
+        } else {
+            // Legacy pseudo signature (unsafe). Kept only to allow upgrading old local outbox rows.
+            let expectedSignature = Self.pseudoSign(payloadHash: payloadHash, authorPubkey: authorPubkey)
+            guard signature.lowercased() == expectedSignature.lowercased() else {
+                return ValidationFailure(category: .protocolInvalid, reason: "signature-mismatch")
+            }
         }
         return nil
+    }
+
+    func signingHash() -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let signable = SigningPayload(
+            schemaVersion: schemaVersion,
+            eventID: eventID,
+            eventType: eventType,
+            entityID: entityID,
+            authorPubkey: authorPubkey,
+            createdAt: createdAt,
+            lamportClock: lamportClock,
+            expiresAt: expiresAt,
+            payloadHash: payloadHash,
+            payload: payload
+        )
+        let data = (try? encoder.encode(signable)) ?? Data()
+        return data.sha256Hash()
+    }
+
+    static func signed(
+        eventType: EventType,
+        entityID: String,
+        identity: NostrIdentity,
+        lamportClock: UInt64,
+        expiresAt: Int? = nil,
+        payload: [String: String],
+        eventID: String = UUID().uuidString.lowercased(),
+        createdAt: Int = Int(Date().timeIntervalSince1970)
+    ) throws -> SemayEventEnvelope {
+        let author = identity.publicKeyHex.lowercased()
+        let payloadHash = canonicalPayloadHash(payload)
+
+        let unsigned = SemayEventEnvelope(
+            eventType: eventType,
+            entityID: entityID,
+            authorPubkey: author,
+            eventID: eventID,
+            createdAt: createdAt,
+            lamportClock: lamportClock,
+            expiresAt: expiresAt,
+            payload: payload,
+            payloadHash: payloadHash,
+            signature: ""
+        )
+
+        let sig = try schnorrSign(messageHash: unsigned.signingHash(), identity: identity)
+        return SemayEventEnvelope(
+            eventType: eventType,
+            entityID: entityID,
+            authorPubkey: author,
+            eventID: eventID,
+            createdAt: createdAt,
+            lamportClock: lamportClock,
+            expiresAt: expiresAt,
+            payload: payload,
+            payloadHash: payloadHash,
+            signature: sig
+        )
     }
 
     static func canonicalPayloadHash(_ payload: [String: String]) -> String {
@@ -112,6 +211,35 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
     static func pseudoSign(payloadHash: String, authorPubkey: String) -> String {
         let raw = Data("\(payloadHash):\(authorPubkey)".utf8)
         return raw.sha256Hash().hexEncodedString()
+    }
+
+    private static func schnorrSign(messageHash: Data, identity: NostrIdentity) throws -> String {
+        let key = try identity.schnorrSigningKey()
+
+        var messageBytes = [UInt8](messageHash)
+        var auxRand = [UInt8](repeating: 0, count: 32)
+        _ = auxRand.withUnsafeMutableBytes { ptr in
+            SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
+        }
+
+        let signature = try key.signature(message: &messageBytes, auxiliaryRand: &auxRand)
+        return signature.dataRepresentation.hexEncodedString()
+    }
+
+    private func isValidSchnorrSignature() -> Bool {
+        guard signature.count == 128,
+              let sigData = Data(hexString: signature),
+              sigData.count == 64,
+              let pubData = Data(hexString: authorPubkey),
+              pubData.count == 32,
+              let sig = try? P256K.Schnorr.SchnorrSignature(dataRepresentation: sigData)
+        else {
+            return false
+        }
+
+        var msg = [UInt8](signingHash())
+        let xonly = P256K.Schnorr.XonlyKey(dataRepresentation: pubData)
+        return xonly.isValid(sig, for: &msg)
     }
 
     private static func isValidHex(_ value: String, expectedLength: Int?) -> Bool {

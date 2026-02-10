@@ -435,6 +435,25 @@ final class SemayDataStore: ObservableObject {
 
     // MARK: - Sync/Outbox
 
+    /// Clears Semay local state (pins/businesses/promises/outbox) on this device.
+    /// Offline packs are stored separately and are not removed.
+    func wipeLocalDatabaseForRestore() {
+        // Close DB on the serialized queue to avoid races with in-flight statements.
+        queue.sync {
+            if let db {
+                sqlite3_close(db)
+                self.db = nil
+            }
+        }
+
+        let path = Self.databasePath()
+        try? FileManager.default.removeItem(atPath: path)
+
+        openDatabase()
+        migrate()
+        refreshAll()
+    }
+
     func pendingOutboxCount() -> Int {
         queryInt("SELECT COUNT(1) FROM event_outbox WHERE status IN ('pending','retry')")
     }
@@ -481,6 +500,38 @@ final class SemayDataStore: ObservableObject {
 
         var rows = loadDueOutboxRows(limit: limit)
         guard !rows.isEmpty else { return report }
+
+        // Upgrade legacy pseudo-signed outbox rows to real Schnorr signatures before sending.
+        if let identity = try? idBridge.getCurrentNostrIdentity() {
+            var upgraded: [OutboxEnvelopeRow] = []
+            upgraded.reserveCapacity(rows.count)
+            for row in rows {
+                if row.envelope.signature.count == 64 {
+                    if let upgradedEnvelope = try? SemayEventEnvelope.signed(
+                        eventType: row.envelope.eventType,
+                        entityID: row.envelope.entityID,
+                        identity: identity,
+                        lamportClock: row.envelope.lamportClock,
+                        expiresAt: row.envelope.expiresAt,
+                        payload: row.envelope.payload,
+                        eventID: row.envelope.eventID,
+                        createdAt: row.envelope.createdAt
+                    ) {
+                        updateOutboxEnvelopeJSON(eventID: row.eventID, envelope: upgradedEnvelope)
+                        upgraded.append(
+                            OutboxEnvelopeRow(
+                                eventID: row.eventID,
+                                envelope: upgradedEnvelope,
+                                attempts: row.attempts
+                            )
+                        )
+                        continue
+                    }
+                }
+                upgraded.append(row)
+            }
+            rows = upgraded
+        }
 
         var validRows: [OutboxEnvelopeRow] = []
         for row in rows {
@@ -1073,20 +1124,45 @@ final class SemayDataStore: ObservableObject {
         payload: [String: String],
         expiresAt: Int? = nil
     ) {
-        let author = currentAuthorPubkey()
         let lamport = nextLamportClock()
-        let payloadHash = SemayEventEnvelope.canonicalPayloadHash(payload)
-        let signature = SemayEventEnvelope.pseudoSign(payloadHash: payloadHash, authorPubkey: author)
-
-        let envelope = SemayEventEnvelope(
-            eventType: type,
-            entityID: entityID,
-            authorPubkey: author,
-            lamportClock: lamport,
-            expiresAt: expiresAt,
-            payload: payload,
-            signature: signature
-        )
+        let envelope: SemayEventEnvelope
+        if let identity = try? idBridge.getCurrentNostrIdentity() {
+            // Preferred: cryptographic Schnorr signature (BIP-340) over a stable signing hash.
+            envelope = (try? SemayEventEnvelope.signed(
+                eventType: type,
+                entityID: entityID,
+                identity: identity,
+                lamportClock: lamport,
+                expiresAt: expiresAt,
+                payload: payload
+            )) ?? SemayEventEnvelope(
+                eventType: type,
+                entityID: entityID,
+                authorPubkey: identity.publicKeyHex.lowercased(),
+                lamportClock: lamport,
+                expiresAt: expiresAt,
+                payload: payload,
+                signature: SemayEventEnvelope.pseudoSign(
+                    payloadHash: SemayEventEnvelope.canonicalPayloadHash(payload),
+                    authorPubkey: identity.publicKeyHex.lowercased()
+                )
+            )
+        } else {
+            // Fallback: legacy pseudo signature (unsafe). Used only when identity is unavailable.
+            let author = currentAuthorPubkey()
+            let payloadHash = SemayEventEnvelope.canonicalPayloadHash(payload)
+            let signature = SemayEventEnvelope.pseudoSign(payloadHash: payloadHash, authorPubkey: author)
+            envelope = SemayEventEnvelope(
+                eventType: type,
+                entityID: entityID,
+                authorPubkey: author,
+                lamportClock: lamport,
+                expiresAt: expiresAt,
+                payload: payload,
+                payloadHash: payloadHash,
+                signature: signature
+            )
+        }
 
         let data = (try? JSONEncoder().encode(envelope)) ?? Data()
         let json = String(data: data, encoding: .utf8) ?? "{}"
@@ -1240,6 +1316,16 @@ final class SemayDataStore: ObservableObject {
             WHERE event_id = ?
             """,
             binds: [.int(attempts), .text(error), .int(now), .text(eventID)]
+        )
+    }
+
+    private func updateOutboxEnvelopeJSON(eventID: String, envelope: SemayEventEnvelope) {
+        let now = Int(Date().timeIntervalSince1970)
+        let data = (try? JSONEncoder().encode(envelope)) ?? Data()
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        _ = execute(
+            "UPDATE event_outbox SET envelope_json = ?, updated_at = ? WHERE event_id = ?",
+            binds: [.text(json), .int(now), .text(eventID)]
         )
     }
 

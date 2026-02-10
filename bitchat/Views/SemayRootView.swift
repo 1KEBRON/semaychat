@@ -1737,6 +1737,7 @@ private struct SemayMeTabView: View {
     @StateObject private var tileStore = OfflineTileStore.shared
 
     @State private var revealPhrase = false
+    @State private var showRestoreSeed = false
     @State private var hubBaseURL = ""
     @State private var hubToken = ""
     @State private var loadingHubMetrics = false
@@ -1781,6 +1782,12 @@ private struct SemayMeTabView: View {
 
                     Button(revealPhrase ? "Hide Phrase" : "Reveal Phrase") {
                         revealPhrase.toggle()
+                    }
+
+                    Button(role: .destructive) {
+                        showRestoreSeed = true
+                    } label: {
+                        Text("Restore From Seed (Replace Identity)")
                     }
                 }
 
@@ -1906,6 +1913,11 @@ private struct SemayMeTabView: View {
                 hubToken = dataStore.hubIngestToken()
                 tileStore.refresh()
             }
+            .sheet(isPresented: $showRestoreSeed) {
+                SemayRestoreSeedSheet(isPresented: $showRestoreSeed)
+                    .environmentObject(seedService)
+                    .environmentObject(dataStore)
+            }
             #if os(iOS)
             .sheet(isPresented: $showPackInfo) {
                 TilePackInfoSheet(
@@ -1928,5 +1940,64 @@ private struct SemayMeTabView: View {
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+}
+
+private struct SemayRestoreSeedSheet: View {
+    @Binding var isPresented: Bool
+    @EnvironmentObject private var seedService: SeedPhraseService
+    @EnvironmentObject private var dataStore: SemayDataStore
+
+    @State private var phrase = ""
+    @State private var error: String?
+    @State private var confirmErase = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Restore From Seed") {
+                    Text("This replaces your identity on this device. It also clears local Semay data (pins, businesses, promises, outbox). Offline map packs stay installed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    TextField("Enter 12 words", text: $phrase, axis: .vertical)
+                        .semayDisableAutoCaps()
+                        .semayDisableAutocorrection()
+                }
+
+                Section {
+                    Toggle("I understand this will erase local Semay data", isOn: $confirmErase)
+                }
+
+                if let error {
+                    Section("Error") {
+                        Text(error)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle("Restore")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { isPresented = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Restore") {
+                        guard confirmErase else {
+                            error = "Please confirm the erase toggle to continue."
+                            return
+                        }
+                        do {
+                            try seedService.restoreFromPhrase(phrase)
+                            dataStore.wipeLocalDatabaseForRestore()
+                            isPresented = false
+                        } catch {
+                            self.error = error.localizedDescription
+                        }
+                    }
+                    .disabled(phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
     }
 }

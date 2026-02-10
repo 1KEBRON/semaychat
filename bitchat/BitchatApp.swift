@@ -52,6 +52,8 @@ struct BitchatApp: App {
                     NotificationDelegate.shared.chatViewModel = chatViewModel
                     // Inject live Noise service into VerificationService to avoid creating new BLE instances
                     VerificationService.shared.configure(with: chatViewModel.meshService.getNoiseService())
+                    // Ensure mnemonic exists before anything derives or caches identity.
+                    _ = SeedPhraseService.shared.getOrCreatePhrase()
                     // Prewarm Nostr identity and QR to make first VERIFY sheet fast
                     let nickname = chatViewModel.nickname
                     DispatchQueue.global(qos: .utility).async {
