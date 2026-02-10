@@ -229,7 +229,7 @@ private struct SemayMapTabView: View {
     @State private var lastAutoPackPath: String?
     @State private var showExplore = false
     @State private var installingCommunityPack = false
-    @State private var dismissedOfflineMapBanner = false
+    @AppStorage("semay.map.dismissedOfflineMapBanner") private var dismissedOfflineMapBanner = false
     @State private var showQRScanner = false
 
     var body: some View {
@@ -308,9 +308,13 @@ private struct SemayMapTabView: View {
                         .padding(.top, 10)
                 }
 
-                if (tileStore.availablePack == nil || tileStore.isBundledStarterSelected), !dismissedOfflineMapBanner {
-                    let starterInstalled = tileStore.isBundledStarterSelected
-                    let canInstallNow = reachability.isOnline || (!starterInstalled && tileStore.canInstallBundledStarterPack)
+                let starterInstalled = tileStore.isBundledStarterSelected
+                let needsInstall = tileStore.availablePack == nil
+                let showOfflineMapBanner = !dismissedOfflineMapBanner && (needsInstall || (starterInstalled && reachability.isOnline))
+                if showOfflineMapBanner {
+                    let canInstallNow = needsInstall
+                        ? (reachability.isOnline || tileStore.canInstallBundledStarterPack)
+                        : reachability.isOnline
                     HStack(spacing: 10) {
                         Image(systemName: reachability.isOnline ? "map" : "wifi.slash")
                             .foregroundStyle(.orange)
@@ -319,8 +323,10 @@ private struct SemayMapTabView: View {
                                 .font(.caption)
                                 .fontWeight(.semibold)
                             Text(reachability.isOnline
-                                 ? (starterInstalled ? "One tap upgrade for Eritrea + Ethiopia." : "One tap download for Eritrea + Ethiopia.")
-                                 : (starterInstalled ? "Connect to a network to download full offline maps." : "Starter map is available now. Upgrade later when online."))
+                                 ? (starterInstalled
+                                    ? (reachability.isExpensive ? "Download full offline maps (Wi-Fi recommended)." : "Download full offline maps.")
+                                    : "Install once so Semay stays useful when the internet is down.")
+                                 : "Starter map is available now. Upgrade later when online.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -373,7 +379,7 @@ private struct SemayMapTabView: View {
                         .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 12)
-                    .padding(.top, (tileStore.availablePack == nil && !dismissedOfflineMapBanner) ? 74 : 12)
+                    .padding(.top, showOfflineMapBanner ? 74 : 12)
 
                     Spacer()
                 }
@@ -848,12 +854,27 @@ private struct SemayMapTabView: View {
         installingCommunityPack = true
         defer { installingCommunityPack = false }
         do {
-            let installed: OfflineTilePack
             if reachability.isOnline {
-                installed = try await tileStore.installRecommendedPack()
-            } else {
-                installed = try tileStore.installBundledStarterPack()
+                do {
+                    let installed = try await tileStore.installRecommendedPack()
+                    updateBaseLayerForConnectivity()
+                    tileImportMessage = "Downloaded offline maps: \(installed.name)."
+                    return
+                } catch {
+                    let reason = error.localizedDescription
+                    if tileStore.availablePack == nil, tileStore.canInstallBundledStarterPack {
+                        let installed = try tileStore.installBundledStarterPack()
+                        updateBaseLayerForConnectivity()
+                        tileImportMessage = "Couldn't download full offline maps (\(reason)). Installed starter offline maps: \(installed.name)."
+                        return
+                    }
+                    updateBaseLayerForConnectivity()
+                    tileImportMessage = "Couldn't download full offline maps (\(reason)). Keeping your current maps."
+                    return
+                }
             }
+
+            let installed = try tileStore.installBundledStarterPack()
             updateBaseLayerForConnectivity()
             tileImportMessage = "Installed \(installed.name)."
         } catch {
@@ -2313,6 +2334,8 @@ private struct BusinessEditorSheet: View {
 	    @State private var installingOfflineMaps = false
 	    @State private var offlineMapsNotice = ""
 	    @State private var offlineMapsError = ""
+            @State private var aboutTapCount = 0
+            @State private var aboutNotice = ""
 	
 	    var body: some View {
 	        NavigationStack {
@@ -2334,8 +2357,31 @@ private struct BusinessEditorSheet: View {
                     ))
                 }
 
-                Section("Settings") {
-                    Toggle("Advanced Settings", isOn: $advancedSettingsEnabled)
+                Section("About") {
+                    Button {
+                        handleAboutTap()
+                    } label: {
+                        HStack {
+                            Text("Version")
+                            Spacer()
+                            Text(appVersionString)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    if !aboutNotice.isEmpty {
+                        Text(aboutNotice)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if advancedSettingsEnabled {
+                        Toggle("Advanced Settings", isOn: $advancedSettingsEnabled)
+                        Text("Advanced settings are for operators running nodes and debugging sync.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Backup") {
@@ -2577,25 +2623,53 @@ private struct BusinessEditorSheet: View {
 	        return formatter.string(fromByteCount: bytes)
 	    }
 	
-	    private func installOfflineMaps() async {
-	        installingOfflineMaps = true
-	        offlineMapsNotice = ""
-	        offlineMapsError = ""
-	        defer { installingOfflineMaps = false }
-	
-	        do {
-	            let installed: OfflineTilePack
-	            if reachability.isOnline {
-	                installed = try await tileStore.installRecommendedPack()
-	            } else {
-	                installed = try tileStore.installBundledStarterPack()
-	            }
-	            offlineMapsNotice = "Installed \(installed.name)."
-	        } catch {
-	            offlineMapsError = error.localizedDescription
-	        }
-	    }
-	}
+		    private func installOfflineMaps() async {
+		        installingOfflineMaps = true
+		        offlineMapsNotice = ""
+		        offlineMapsError = ""
+		        defer { installingOfflineMaps = false }
+		
+		        do {
+		            if reachability.isOnline {
+		                do {
+		                    let installed = try await tileStore.installRecommendedPack()
+		                    offlineMapsNotice = "Downloaded offline maps: \(installed.name)."
+		                    return
+		                } catch {
+		                    let reason = error.localizedDescription
+		                    if tileStore.availablePack == nil, tileStore.canInstallBundledStarterPack {
+		                        let installed = try tileStore.installBundledStarterPack()
+		                        offlineMapsNotice = "Couldn't download full offline maps (\(reason)). Installed starter offline maps: \(installed.name)."
+		                        return
+		                    }
+		                    offlineMapsError = "Couldn't download full offline maps (\(reason))."
+		                    return
+		                }
+		            }
+
+		            let installed = try tileStore.installBundledStarterPack()
+		            offlineMapsNotice = "Installed \(installed.name)."
+		        } catch {
+		            offlineMapsError = error.localizedDescription
+		        }
+		    }
+
+            private var appVersionString: String {
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+                let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+                return "\(version) (\(build))"
+            }
+
+            private func handleAboutTap() {
+                guard !advancedSettingsEnabled else { return }
+                aboutTapCount += 1
+                if aboutTapCount >= 7 {
+                    advancedSettingsEnabled = true
+                    aboutNotice = "Advanced settings enabled."
+                    aboutTapCount = 0
+                }
+            }
+		}
 
 private struct SemayRestoreSeedSheet: View {
     @Binding var isPresented: Bool

@@ -525,7 +525,7 @@ final class OfflineTileStore: ObservableObject {
         throw NSError(
             domain: "OfflineTileStore",
             code: 30,
-            userInfo: [NSLocalizedDescriptionKey: "Offline maps aren't available right now. You can keep using Semay online, or try again later. Operators: set a Semay node in Me > Advanced."]
+            userInfo: [NSLocalizedDescriptionKey: "Offline maps aren't available right now. You can keep using Semay online, or try again later."]
         )
     }
 

@@ -61,7 +61,7 @@ final class SemayNodeDiscoveryService: ObservableObject {
         throw NSError(
             domain: "semay.node",
             code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "No Semay node is reachable right now. You can keep using Semay offline. Operators: set a Semay node in Me > Advanced."]
+            userInfo: [NSLocalizedDescriptionKey: "No Semay node is reachable right now. You can keep using Semay offline."]
         )
     }
 
@@ -115,4 +115,3 @@ final class SemayNodeDiscoveryService: ObservableObject {
         }
     }
 }
-

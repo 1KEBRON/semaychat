@@ -424,7 +424,7 @@ final class LibraryPackStore: ObservableObject {
         throw NSError(
             domain: "LibraryPackStore",
             code: 30,
-            userInfo: [NSLocalizedDescriptionKey: "Library packs aren't available right now. You can keep using Semay without the library, or try again later. Operators: set a Semay node in Me > Advanced."]
+            userInfo: [NSLocalizedDescriptionKey: "Library packs aren't available right now. You can keep using Semay without the library, or try again later."]
         )
     }
 
