@@ -2039,6 +2039,10 @@ private struct BusinessEditorSheet: View {
                     phone = existingBusiness.phone
                     latitude = String(format: "%.6f", existingBusiness.latitude)
                     longitude = String(format: "%.6f", existingBusiness.longitude)
+                } else if locationState.permissionState == .authorized,
+                          let loc = locationState.lastKnownLocation {
+                    latitude = String(format: "%.6f", loc.coordinate.latitude)
+                    longitude = String(format: "%.6f", loc.coordinate.longitude)
                 }
             }
         }
