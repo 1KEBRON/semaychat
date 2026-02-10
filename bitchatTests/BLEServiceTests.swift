@@ -62,59 +62,56 @@ struct BLEServiceTests {
     // MARK: - Message Sending Tests
     
     @Test func sendPublicMessage() async throws {
-        try await confirmation { receivedPublicMessage in
-            let delegate = MockBitchatDelegate { message in
-                #expect(message.content == "Hello, world!")
-                #expect(message.sender == "TestUser")
-                #expect(!message.isPrivate)
-                receivedPublicMessage()
-            }
-            service.delegate = delegate
-            service.sendMessage("Hello, world!")
-            
-            // Allow async processing
-            try await sleep(1.0)
+        let received = Locked<BitchatMessage?>(nil)
+        let delegate = MockBitchatDelegate { message in
+            received.set(message)
         }
+        service.delegate = delegate
+        service.sendMessage("Hello, world!")
+
+        try await TestHelpers.waitFor({ received.get() != nil }, timeout: TestConstants.defaultTimeout)
+        let message = try #require(received.get())
+        #expect(message.content == "Hello, world!")
+        #expect(message.sender == "TestUser")
+        #expect(!message.isPrivate)
         #expect(service.sentMessages.count == 1)
     }
     
     @Test func sendPrivateMessage() async throws {
-        try await confirmation { receivedPrivateMessage in
-            let delegate = MockBitchatDelegate { message in
-                #expect(message.content == "Secret message")
-                #expect(message.sender == "TestUser")
-                #expect(message.senderPeerID == PeerID(str: myUUID.uuidString))
-                #expect(message.isPrivate)
-                #expect(message.recipientNickname == "Bob")
-                receivedPrivateMessage()
-            }
-            service.delegate = delegate
-            service.sendPrivateMessage(
-                "Secret message",
-                to: PeerID(str: UUID().uuidString),
-                recipientNickname: "Bob",
-                messageID: "MSG123"
-            )
-            
-            // Allow async processing
-            try await sleep(1.0)
+        let received = Locked<BitchatMessage?>(nil)
+        let delegate = MockBitchatDelegate { message in
+            received.set(message)
         }
+        service.delegate = delegate
+        service.sendPrivateMessage(
+            "Secret message",
+            to: PeerID(str: UUID().uuidString),
+            recipientNickname: "Bob",
+            messageID: "MSG123"
+        )
+
+        try await TestHelpers.waitFor({ received.get() != nil }, timeout: TestConstants.defaultTimeout)
+        let message = try #require(received.get())
+        #expect(message.content == "Secret message")
+        #expect(message.sender == "TestUser")
+        #expect(message.senderPeerID == PeerID(str: myUUID.uuidString))
+        #expect(message.isPrivate)
+        #expect(message.recipientNickname == "Bob")
         #expect(service.sentMessages.count == 1)
     }
     
     @Test func sendMessageWithMentions() async throws {
-        try await confirmation { receivedMessageWithMentions in
-            let delegate = MockBitchatDelegate { message in
-                #expect(message.content == "@alice @bob check this out")
-                #expect(message.mentions == ["alice", "bob"])
-                receivedMessageWithMentions()
-            }
-            service.delegate = delegate
-            service.sendMessage("@alice @bob check this out", mentions: ["alice", "bob"])
-            
-            // Allow async processing
-            try await sleep(1.0)
+        let received = Locked<BitchatMessage?>(nil)
+        let delegate = MockBitchatDelegate { message in
+            received.set(message)
         }
+        service.delegate = delegate
+        service.sendMessage("@alice @bob check this out", mentions: ["alice", "bob"])
+
+        try await TestHelpers.waitFor({ received.get() != nil }, timeout: TestConstants.defaultTimeout)
+        let message = try #require(received.get())
+        #expect(message.content == "@alice @bob check this out")
+        #expect(message.mentions == ["alice", "bob"])
     }
     
     // MARK: - Message Reception Tests
@@ -299,4 +296,25 @@ private final class MockBitchatDelegate: BitchatDelegate {
     func didReceiveNoisePayload(from peerID: PeerID, type: NoisePayloadType, payload: Data, timestamp: Date) {}
     func didUpdateBluetoothState(_ state: CBManagerState) {}
     func didReceivePublicMessage(from peerID: PeerID, nickname: String, content: String, timestamp: Date, messageID: String?) {}
+}
+
+private final class Locked<Value> {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ initial: Value) {
+        self.value = initial
+    }
+
+    func set(_ newValue: Value) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func get() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }

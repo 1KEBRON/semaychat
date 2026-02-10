@@ -112,6 +112,16 @@ struct SemayRootView: View {
         guard let first = parts.first, !first.isEmpty else { return }
 
         switch host {
+        case "loc", "plus", "pluscode":
+            // Deep link to a plus code location: semay://loc/849VCWC8+R9
+            if let area = OpenLocationCode.decode(first) {
+                navigation.selectedBusinessID = nil
+                navigation.selectedPinID = nil
+                let zoom = max(0.06, max(area.latitudeSpan, area.longitudeSpan) * 50.0)
+                navigation.pendingCenter = .init(latitude: area.centerLatitude, longitude: area.centerLongitude, zoomDelta: zoom)
+                navigation.pendingFocus = true
+                selectedTab = .map
+            }
         case "business":
             navigation.selectedPinID = nil
             navigation.selectedBusinessID = first
@@ -678,6 +688,13 @@ private struct SemayMapTabView: View {
                     navigation.pendingFocus = false
                 }
             }
+            .onChange(of: navigation.pendingCenter) { _ in
+                guard navigation.pendingFocus else { return }
+                guard let pending = navigation.pendingCenter else { return }
+                centerMap(latitude: pending.latitude, longitude: pending.longitude, zoomDelta: pending.zoomDelta)
+                navigation.pendingCenter = nil
+                navigation.pendingFocus = false
+            }
             .onChange(of: dataStore.businesses.count) { _ in
                 guard navigation.pendingFocus else { return }
                 if let id = navigation.selectedBusinessID,
@@ -727,6 +744,7 @@ private struct SemayMapTabView: View {
         lines.append("\(business.category) • \(business.eAddress)")
         if !business.plusCode.isEmpty {
             lines.append(business.plusCode)
+            lines.append("semay://loc/\(business.plusCode)")
         }
         if !business.phone.isEmpty {
             lines.append("Call: \(business.phone)")
@@ -741,6 +759,7 @@ private struct SemayMapTabView: View {
         lines.append("\(pin.type) • \(pin.eAddress)")
         if !pin.plusCode.isEmpty {
             lines.append(pin.plusCode)
+            lines.append("semay://loc/\(pin.plusCode)")
         }
         if !pin.phone.isEmpty {
             lines.append("Call: \(pin.phone)")
@@ -2466,9 +2485,10 @@ private struct BusinessEditorSheet: View {
                                 hubMetricsError = ""
                                 defer { discoveringHub = false }
                                 do {
-                                    let discovered = try await tileStore.discoverMapSourceURL()
+                                    let discovered = try await SemayNodeDiscoveryService.shared.discoverBaseURLString()
                                     hubBaseURL = discovered
                                     dataStore.saveHubConfig(baseURL: discovered, token: hubToken)
+                                    tileStore.reloadSourceConfig()
                                     hubDiscoveryNotice = "Connected to \(discovered)"
                                 } catch {
                                     hubMetricsError = error.localizedDescription

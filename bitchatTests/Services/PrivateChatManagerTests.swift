@@ -40,9 +40,13 @@ struct PrivateChatManagerTests {
 
     @Test @MainActor
     func markAsRead_sendsReadReceiptViaRouter() async {
+        let suite = "test.semaysafe.readreceipts.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(true, forKey: "semay.read_receipts_enabled")
+
         let transport = MockTransport()
-        let router = MessageRouter(transports: [transport])
-        let manager = PrivateChatManager(meshService: transport)
+        let router = MessageRouter(transports: [transport], defaults: defaults)
+        let manager = PrivateChatManager(meshService: transport, defaults: defaults)
         manager.messageRouter = router
 
         let peerID = PeerID(str: "00000000000000BB")

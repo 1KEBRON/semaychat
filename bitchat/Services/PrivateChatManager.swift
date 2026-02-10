@@ -18,6 +18,7 @@ final class PrivateChatManager: ObservableObject {
 
     private var selectedPeerFingerprint: String? = nil
     var sentReadReceipts: Set<String> = []  // Made accessible for ChatViewModel
+    private let defaults: UserDefaults
 
     weak var meshService: Transport?
     // Route acks/receipts via MessageRouter (chooses mesh or Nostr)
@@ -25,8 +26,9 @@ final class PrivateChatManager: ObservableObject {
     // Peer service for looking up peer info during consolidation
     weak var unifiedPeerService: UnifiedPeerService?
 
-    init(meshService: Transport? = nil) {
+    init(meshService: Transport? = nil, defaults: UserDefaults = .standard) {
         self.meshService = meshService
+        self.defaults = defaults
     }
 
     // Cap for messages stored per private chat
@@ -249,7 +251,7 @@ final class PrivateChatManager: ObservableObject {
     // MARK: - Private Methods
     
     private func sendReadReceipt(for message: BitchatMessage) {
-        guard UserDefaults.standard.bool(forKey: "semay.read_receipts_enabled") else {
+        guard defaults.bool(forKey: "semay.read_receipts_enabled") else {
             return
         }
         guard !sentReadReceipts.contains(message.id),

@@ -47,7 +47,11 @@ struct MessageRouterTests {
         let transport = MockTransport()
         transport.reachablePeers.insert(peerID)
 
-        let router = MessageRouter(transports: [transport])
+        let suite = "test.semaysafe.readreceipts.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(true, forKey: "semay.read_receipts_enabled")
+
+        let router = MessageRouter(transports: [transport], defaults: defaults)
         let receipt = ReadReceipt(originalMessageID: "m3", readerID: transport.myPeerID, readerNickname: "Me")
         router.sendReadReceipt(receipt, to: peerID)
 
