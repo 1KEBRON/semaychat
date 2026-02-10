@@ -444,10 +444,8 @@ final class SemayDataStore: ObservableObject {
     }
 
     func hubBaseURLString() -> String {
-        if let value = UserDefaults.standard.string(forKey: hubBaseURLKey), !value.isEmpty {
-            return value
-        }
-        return "http://127.0.0.1:5000"
+        UserDefaults.standard.string(forKey: hubBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     func hubIngestToken() -> String {
@@ -465,8 +463,19 @@ final class SemayDataStore: ObservableObject {
     func syncOutboxToHub(limit: Int = 50) async -> OutboxSyncReport {
         var report = OutboxSyncReport()
 
-        guard let endpointURL = makeHubBatchEndpointURL() else {
-            report.errorMessage = "hub-url-missing-or-invalid"
+        var endpointURL = makeHubBatchEndpointURL()
+        if endpointURL == nil {
+            // Auto-discover a reachable node when the user creates events but never touched Advanced settings.
+            do {
+                _ = try await OfflineTileStore.shared.discoverMapSourceURL()
+            } catch {
+                report.errorMessage = error.localizedDescription
+                return report
+            }
+            endpointURL = makeHubBatchEndpointURL()
+        }
+        guard let endpointURL else {
+            report.errorMessage = "node-url-missing-or-invalid"
             return report
         }
 
@@ -539,11 +548,17 @@ final class SemayDataStore: ObservableObject {
     }
 
     func fetchHubMetrics(windowSeconds: Int = 24 * 60 * 60) async throws -> HubIngestMetrics {
-        guard let endpointURL = makeHubMetricsEndpointURL(windowSeconds: windowSeconds) else {
+        var endpointURL = makeHubMetricsEndpointURL(windowSeconds: windowSeconds)
+        if endpointURL == nil {
+            // Best-effort discovery for operators who hit "Load Node Metrics" first.
+            _ = try? await OfflineTileStore.shared.discoverMapSourceURL()
+            endpointURL = makeHubMetricsEndpointURL(windowSeconds: windowSeconds)
+        }
+        guard let endpointURL else {
             throw NSError(
-                domain: "semay.hub",
+                domain: "semay.node",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "hub-url-missing-or-invalid"]
+                userInfo: [NSLocalizedDescriptionKey: "node-url-missing-or-invalid"]
             )
         }
 
