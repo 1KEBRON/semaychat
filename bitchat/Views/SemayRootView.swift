@@ -95,6 +95,13 @@ struct SemayRootView: View {
                 .interactiveDismissDisabled(true)
                 .environmentObject(seedService)
         }
+        .sheet(item: Binding(
+            get: { navigation.inboundEnvelope },
+            set: { navigation.inboundEnvelope = $0 }
+        )) { envelope in
+            SemayPromiseEnvelopeSheet(envelope: envelope)
+                .environmentObject(dataStore)
+        }
     }
 
     private func handleSemayDeepLink(_ url: URL) {
@@ -115,6 +122,14 @@ struct SemayRootView: View {
             navigation.selectedPinID = first
             navigation.pendingFocus = true
             selectedTab = .map
+        case "promise", "promise-response":
+            guard first.count <= 16_384,
+                  let data = Base64URL.decode(first),
+                  let envelope = try? JSONDecoder().decode(SemayEventEnvelope.self, from: data) else {
+                return
+            }
+            navigation.inboundEnvelope = envelope
+            selectedTab = .business
         default:
             break
         }
@@ -195,6 +210,7 @@ private struct SemayMapTabView: View {
     @State private var editingPin: SemayMapPin?
     @State private var pinEditorCoordinate: CLLocationCoordinate2D?
     @State private var editingBusiness: BusinessProfile?
+    @State private var promisePayBusiness: BusinessProfile?
     @State private var useOSMBaseMap = false
     @State private var useOfflineTiles = false
     @State private var showTileImporter = false
@@ -204,6 +220,7 @@ private struct SemayMapTabView: View {
     @State private var showExplore = false
     @State private var installingCommunityPack = false
     @State private var dismissedOfflineMapBanner = false
+    @State private var showQRScanner = false
 
     var body: some View {
         NavigationStack {
@@ -378,6 +395,10 @@ private struct SemayMapTabView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                             }
+                            Button("Promise Pay") {
+                                promisePayBusiness = selected
+                            }
+                            .buttonStyle(.bordered)
                             Button("Directions") {
                                 openDirections(latitude: selected.latitude, longitude: selected.longitude, name: selected.name)
                             }
@@ -501,6 +522,15 @@ private struct SemayMapTabView: View {
                         Image(systemName: "plus")
                     }
                 }
+                #if os(iOS)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showQRScanner = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                }
+                #endif
             }
             .sheet(isPresented: $showAddPin) {
                     AddPinSheet(isPresented: $showAddPin, existingPin: editingPin, initialCoordinate: pinEditorCoordinate)
@@ -510,6 +540,15 @@ private struct SemayMapTabView: View {
                 BusinessEditorSheet(existingBusiness: business)
                     .environmentObject(dataStore)
             }
+            .sheet(item: $promisePayBusiness) { business in
+                SemayPromiseCreateSheet(business: business)
+                    .environmentObject(dataStore)
+            }
+            #if os(iOS)
+            .sheet(isPresented: $showQRScanner) {
+                SemayQRScanSheet(isPresented: $showQRScanner)
+            }
+            #endif
             .sheet(isPresented: $showExplore) {
                 SemayExploreSheet(
                     isPresented: $showExplore,
@@ -1712,6 +1751,8 @@ private struct SemayBusinessTabView: View {
     @State private var showRegisterBusiness = false
     @State private var qrBusiness: BusinessProfile?
     @State private var editingBusiness: BusinessProfile?
+    @State private var showQRScanner = false
+    @State private var settlementPromise: PromiseNote?
 
     var body: some View {
         NavigationStack {
@@ -1780,7 +1821,7 @@ private struct SemayBusinessTabView: View {
                     } else {
                         ForEach(dataStore.promises) { promise in
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("\(promise.amountMsat) msat")
+                                Text("\(promise.amountMsat / 1000) sats")
                                     .font(.headline)
                                 Text("\(promise.status.rawValue.capitalized) • Expires \(Date(timeIntervalSince1970: TimeInterval(promise.expiresAt)).formatted())")
                                     .font(.caption)
@@ -1799,13 +1840,8 @@ private struct SemayBusinessTabView: View {
                                     }
 
                                     if promise.status == .accepted {
-                                        Button("Settle") {
-                                            _ = dataStore.submitSettlement(
-                                                promiseID: promise.promiseID,
-                                                proofType: .lightningPaymentHash,
-                                                proofValue: UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                                                submittedBy: .merchant
-                                            )
+                                        Button("Record Settlement") {
+                                            settlementPromise = promise
                                         }
                                         .buttonStyle(.borderedProminent)
                                     }
@@ -1824,6 +1860,15 @@ private struct SemayBusinessTabView: View {
                         Label("Register", systemImage: "plus")
                     }
                 }
+                #if os(iOS)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showQRScanner = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                }
+                #endif
             }
             .sheet(isPresented: $showRegisterBusiness) {
                 BusinessEditorSheet(existingBusiness: nil)
@@ -1836,6 +1881,15 @@ private struct SemayBusinessTabView: View {
                 BusinessEditorSheet(existingBusiness: business)
                     .environmentObject(dataStore)
             }
+            .sheet(item: $settlementPromise) { promise in
+                SemaySettlementSheet(promise: promise)
+                    .environmentObject(dataStore)
+            }
+            #if os(iOS)
+            .sheet(isPresented: $showQRScanner) {
+                SemayQRScanSheet(isPresented: $showQRScanner)
+            }
+            #endif
         }
     }
 

@@ -7,7 +7,7 @@ final class SemayNavigationState: ObservableObject {
     @Published var selectedPinID: String?
     @Published var selectedBusinessID: String?
     @Published var pendingFocus: Bool = false
+    @Published var inboundEnvelope: SemayEventEnvelope?
 
     private init() {}
 }
-

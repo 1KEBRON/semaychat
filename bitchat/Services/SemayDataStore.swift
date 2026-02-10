@@ -618,6 +618,163 @@ final class SemayDataStore: ObservableObject {
         return note
     }
 
+    /// Build a signed promise.create envelope suitable for QR / peer-to-peer transfer.
+    /// Promise events are intentionally not uploaded to nodes/hubs by default (hostile-default privacy).
+    func makePromiseCreateEnvelope(for note: PromiseNote) -> SemayEventEnvelope? {
+        let lamport = nextLamportClock()
+        let payload: [String: String] = [
+            "promise_id": note.promiseID,
+            "merchant_id": note.merchantID,
+            "payer_pubkey": note.payerPubkey,
+            "amount_msat": String(note.amountMsat),
+            "fiat_quote": note.fiatQuote ?? "",
+            "currency": note.currency,
+            "expires_at": String(note.expiresAt),
+            "nonce": note.nonce,
+            "payer_signature": note.payerSignature,
+            "status": note.status.rawValue
+        ]
+
+        if let identity = try? idBridge.getCurrentNostrIdentity() {
+            return (try? SemayEventEnvelope.signed(
+                eventType: .promiseCreate,
+                entityID: "promise:\(note.promiseID)",
+                identity: identity,
+                lamportClock: lamport,
+                expiresAt: note.expiresAt,
+                payload: payload,
+                eventID: UUID().uuidString.lowercased(),
+                createdAt: note.createdAt
+            ))
+        }
+
+        let author = currentAuthorPubkey()
+        let payloadHash = SemayEventEnvelope.canonicalPayloadHash(payload)
+        let signature = SemayEventEnvelope.pseudoSign(payloadHash: payloadHash, authorPubkey: author)
+        return SemayEventEnvelope(
+            eventType: .promiseCreate,
+            entityID: "promise:\(note.promiseID)",
+            authorPubkey: author,
+            eventID: UUID().uuidString.lowercased(),
+            createdAt: note.createdAt,
+            lamportClock: lamport,
+            expiresAt: note.expiresAt,
+            payload: payload,
+            payloadHash: payloadHash,
+            signature: signature
+        )
+    }
+
+    /// Build a signed promise.accept / promise.reject envelope in response to a promise.create.
+    func makePromiseResponseEnvelope(
+        promiseID: String,
+        merchantID: String,
+        status: PromiseStatus
+    ) -> SemayEventEnvelope? {
+        let eventType: SemayEventEnvelope.EventType
+        switch status {
+        case .accepted: eventType = .promiseAccept
+        case .rejected: eventType = .promiseReject
+        default:
+            return nil
+        }
+
+        let lamport = nextLamportClock()
+        let now = Int(Date().timeIntervalSince1970)
+        let payload: [String: String] = [
+            "promise_id": promiseID,
+            "merchant_id": merchantID,
+            "status": status.rawValue,
+            "responded_at": String(now)
+        ]
+
+        if let identity = try? idBridge.getCurrentNostrIdentity() {
+            return (try? SemayEventEnvelope.signed(
+                eventType: eventType,
+                entityID: "promise:\(promiseID)",
+                identity: identity,
+                lamportClock: lamport,
+                expiresAt: nil,
+                payload: payload
+            ))
+        }
+
+        let author = currentAuthorPubkey()
+        let payloadHash = SemayEventEnvelope.canonicalPayloadHash(payload)
+        let signature = SemayEventEnvelope.pseudoSign(payloadHash: payloadHash, authorPubkey: author)
+        return SemayEventEnvelope(
+            eventType: eventType,
+            entityID: "promise:\(promiseID)",
+            authorPubkey: author,
+            lamportClock: lamport,
+            expiresAt: nil,
+            payload: payload,
+            payloadHash: payloadHash,
+            signature: signature
+        )
+    }
+
+    /// Import a promise.create envelope into the local ledger (e.g., when a merchant scans a payer QR).
+    @discardableResult
+    func importPromiseCreateEnvelope(_ envelope: SemayEventEnvelope) -> PromiseNote? {
+        guard envelope.eventType == .promiseCreate else { return nil }
+        if envelope.validate() != nil { return nil }
+
+        let p = envelope.payload
+        guard let promiseID = p["promise_id"], !promiseID.isEmpty else { return nil }
+        guard let merchantID = p["merchant_id"], !merchantID.isEmpty else { return nil }
+
+        if let claimedPayer = p["payer_pubkey"], !claimedPayer.isEmpty,
+           claimedPayer.lowercased() != envelope.authorPubkey.lowercased() {
+            return nil
+        }
+        let payer = (p["payer_pubkey"] ?? envelope.authorPubkey).lowercased()
+        guard let amount = UInt64(p["amount_msat"] ?? "") else { return nil }
+
+        let expiresAt = Int(p["expires_at"] ?? "") ?? envelope.expiresAt ?? PromiseNote.defaultExpiry()
+        let nonce = p["nonce"] ?? ""
+        let payerSig = p["payer_signature"] ?? envelope.signature
+
+        let note = PromiseNote(
+            promiseID: promiseID,
+            merchantID: merchantID,
+            payerPubkey: payer,
+            amountMsat: amount,
+            fiatQuote: (p["fiat_quote"] ?? "").isEmpty ? nil : (p["fiat_quote"] ?? ""),
+            currency: (p["currency"] ?? "").isEmpty ? "BTC_LN" : (p["currency"] ?? "BTC_LN"),
+            expiresAt: expiresAt,
+            nonce: nonce,
+            payerSignature: payerSig,
+            status: .pending,
+            createdAt: envelope.createdAt,
+            updatedAt: Int(Date().timeIntervalSince1970)
+        )
+
+        upsertPromise(note)
+        refreshPromises()
+        return note
+    }
+
+    /// Apply a promise.accept / promise.reject envelope to the local ledger (e.g., payer scans merchant response QR).
+    @discardableResult
+    func applyPromiseResponseEnvelope(_ envelope: SemayEventEnvelope) -> PromiseNote? {
+        guard envelope.eventType == .promiseAccept || envelope.eventType == .promiseReject else { return nil }
+        if envelope.validate() != nil { return nil }
+
+        let p = envelope.payload
+        guard let promiseID = p["promise_id"], !promiseID.isEmpty else { return nil }
+
+        let status: PromiseStatus = (envelope.eventType == .promiseAccept) ? .accepted : .rejected
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = execute(
+            "UPDATE promise_notes SET status = ?, updated_at = ? WHERE promise_id = ?",
+            binds: [.text(status.rawValue), .int(now), .text(promiseID)]
+        )
+        refreshPromises()
+        return promises.first(where: { $0.promiseID == promiseID })
+    }
+
     @discardableResult
     func updatePromiseStatus(_ promiseID: String, status: PromiseStatus) -> PromiseNote? {
         var promise = promises.first(where: { $0.promiseID == promiseID })
@@ -1533,6 +1690,10 @@ final class SemayDataStore: ObservableObject {
         payload: [String: String],
         expiresAt: Int? = nil
     ) {
+        // Hostile-default privacy: only upload public directory events by default.
+        // Promise lifecycle events are peer-to-peer and should not be sent to a public node/hub.
+        guard shouldUploadToHub(type) else { return }
+
         let lamport = nextLamportClock()
         let envelope: SemayEventEnvelope
         if let identity = try? idBridge.getCurrentNostrIdentity() {
@@ -1585,6 +1746,15 @@ final class SemayDataStore: ObservableObject {
         """
 
         _ = execute(sql, binds: [.text(envelope.eventID), .text(json), .int(now), .int(now)])
+    }
+
+    private func shouldUploadToHub(_ type: SemayEventEnvelope.EventType) -> Bool {
+        switch type {
+        case .pinCreate, .pinUpdate, .pinApproval, .businessRegister:
+            return true
+        case .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage:
+            return false
+        }
     }
 
     private func makeHubBatchEndpointURL() -> URL? {
