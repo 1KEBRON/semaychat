@@ -3,9 +3,12 @@ import Foundation
 import SQLite3
 
 private let selectedPackKey = "semay.offlineTiles.selectedPath"
+private let seededStarterKey = "semay.offlineTiles.seededStarter"
 private let hubBaseURLKey = "semay.hub.base_url"
 private let hubIngestTokenKey = "semay.hub.ingest_token"
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let bundledStarterTilesName = "semay-starter-asmara"
+private let bundledStarterTilesExtension = "mbtiles"
 private let defaultHubCandidates = [
     "https://hub.semay.app",
     "http://semayhub.local:5000",
@@ -104,6 +107,15 @@ final class OfflineTileStore: ObservableObject {
         refresh()
     }
 
+    var canInstallBundledStarterPack: Bool {
+        bundledStarterPackURL() != nil
+    }
+
+    var isBundledStarterSelected: Bool {
+        guard let path = availablePack?.path.lowercased() else { return false }
+        return path.hasSuffix("\(bundledStarterTilesName).\(bundledStarterTilesExtension)")
+    }
+
     func reloadSourceConfig() {
         activeMapSourceBaseURL = configuredHubBaseURL()?.absoluteString
         activeNodeName = nil
@@ -111,7 +123,14 @@ final class OfflineTileStore: ObservableObject {
     }
 
     func refresh() {
-        let discovered = discoverPacks()
+        var discovered = discoverPacks()
+        if discovered.isEmpty && !UserDefaults.standard.bool(forKey: seededStarterKey) {
+            // Seed a tiny offline starter pack from the app bundle so first launch is still useful offline.
+            if (try? installBundledStarterPackToDocuments()) != nil {
+                UserDefaults.standard.set(true, forKey: seededStarterKey)
+            }
+            discovered = discoverPacks()
+        }
         packs = discovered
 
         let selectedPath = UserDefaults.standard.string(forKey: selectedPackKey)
@@ -132,6 +151,22 @@ final class OfflineTileStore: ObservableObject {
         } else {
             UserDefaults.standard.removeObject(forKey: selectedPackKey)
         }
+    }
+
+    @discardableResult
+    func installBundledStarterPack() throws -> OfflineTilePack {
+        let targetURL = try installBundledStarterPackToDocuments()
+        guard let installed = readPackMetadata(path: targetURL.path) else {
+            throw NSError(
+                domain: "OfflineTileStore",
+                code: 18,
+                userInfo: [NSLocalizedDescriptionKey: "Bundled starter pack is not a valid MBTiles file"]
+            )
+        }
+        UserDefaults.standard.set(true, forKey: seededStarterKey)
+        refresh()
+        selectPack(installed)
+        return installed
     }
 
     func importPack(from url: URL) throws -> OfflineTilePack {
@@ -338,6 +373,24 @@ final class OfflineTileStore: ObservableObject {
         let tilesDir = docs.appendingPathComponent("tiles", isDirectory: true)
         try fm.createDirectory(at: tilesDir, withIntermediateDirectories: true)
         return tilesDir
+    }
+
+    private func bundledStarterPackURL() -> URL? {
+        Bundle.main.url(forResource: bundledStarterTilesName, withExtension: bundledStarterTilesExtension)
+    }
+
+    private func installBundledStarterPackToDocuments() throws -> URL {
+        guard let sourceURL = bundledStarterPackURL() else {
+            throw NSError(
+                domain: "OfflineTileStore",
+                code: 17,
+                userInfo: [NSLocalizedDescriptionKey: "Bundled starter pack is unavailable"]
+            )
+        }
+        return try copyPackToLocalStorage(
+            from: sourceURL,
+            preferredName: "\(bundledStarterTilesName).\(bundledStarterTilesExtension)"
+        )
     }
 
     private func copyPackToLocalStorage(from sourceURL: URL, preferredName: String) throws -> URL {

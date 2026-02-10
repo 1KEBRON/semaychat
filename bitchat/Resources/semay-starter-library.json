@@ -1,0 +1,20 @@
+{
+  "pack_name": "Semay Starter Library",
+  "languages": [
+    "en"
+  ],
+  "items": [
+    {
+      "item_id": "welcome",
+      "title": "Welcome to Semay",
+      "language": "en",
+      "content_md": "Semay is an offline-first directory and coordination layer for the Horn of Africa.\n\nThis library is distributed as small packs so it works fully offline.\n"
+    },
+    {
+      "item_id": "how-to-contribute",
+      "title": "How to Contribute",
+      "language": "en",
+      "content_md": "1. Open Map\n2. Long-press where the place is\n3. Add name/type/description\n4. Approve nearby places when you are there\n"
+    }
+  ]
+}

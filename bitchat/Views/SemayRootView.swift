@@ -298,26 +298,30 @@ private struct SemayMapTabView: View {
                         .padding(.top, 10)
                 }
 
-                if tileStore.availablePack == nil, !dismissedOfflineMapBanner {
+                if (tileStore.availablePack == nil || tileStore.isBundledStarterSelected), !dismissedOfflineMapBanner {
+                    let starterInstalled = tileStore.isBundledStarterSelected
+                    let canInstallNow = reachability.isOnline || (!starterInstalled && tileStore.canInstallBundledStarterPack)
                     HStack(spacing: 10) {
                         Image(systemName: reachability.isOnline ? "map" : "wifi.slash")
                             .foregroundStyle(.orange)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(reachability.isOnline ? "Offline maps not installed" : "Offline maps not installed")
+                            Text(starterInstalled ? "Offline maps: starter installed" : "Offline maps not installed")
                                 .font(.caption)
                                 .fontWeight(.semibold)
-                            Text(reachability.isOnline ? "One tap download for Eritrea + Ethiopia." : "Connect to a network to download offline maps.")
+                            Text(reachability.isOnline
+                                 ? (starterInstalled ? "One tap upgrade for Eritrea + Ethiopia." : "One tap download for Eritrea + Ethiopia.")
+                                 : (starterInstalled ? "Connect to a network to download full offline maps." : "Starter map is available now. Upgrade later when online."))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button(installingCommunityPack ? "Installing..." : "Install") {
+                        Button(installingCommunityPack ? "Installing..." : (starterInstalled ? "Upgrade" : "Install")) {
                             Task {
                                 await installCommunityPack()
                             }
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!reachability.isOnline || installingCommunityPack)
+                        .disabled(!canInstallNow || installingCommunityPack)
 
                         Button("Continue") {
                             dismissedOfflineMapBanner = true
@@ -738,15 +742,26 @@ private struct SemayMapTabView: View {
 
     private func updateBaseLayerForConnectivity() {
         // Keep the default map looking native whenever we can.
-        // Offline tiles are only used when offline (and a pack is installed).
-        if !reachability.isOnline, tileStore.availablePack != nil {
-            useOfflineTiles = true
-            useOSMBaseMap = false
-            autoSelectPackIfNeeded()
-        } else {
-            useOfflineTiles = false
-            useOSMBaseMap = false
+        // Offline tiles are only used when offline and the current region is covered by a pack.
+        if !reachability.isOnline {
+            if let best = tileStore.bestPack(forLatitude: region.center.latitude, longitude: region.center.longitude) {
+                if best.path != tileStore.availablePack?.path {
+                    tileStore.selectPack(best)
+                }
+                useOfflineTiles = true
+                useOSMBaseMap = false
+                lastAutoPackPath = best.path
+                return
+            }
+            if let pack = tileStore.availablePack, pack.bounds == nil {
+                useOfflineTiles = true
+                useOSMBaseMap = false
+                return
+            }
         }
+
+        useOfflineTiles = false
+        useOSMBaseMap = false
     }
 
     private func approvePin(_ pin: SemayMapPin) {
@@ -778,8 +793,12 @@ private struct SemayMapTabView: View {
         installingCommunityPack = true
         defer { installingCommunityPack = false }
         do {
-            let installed = try await tileStore.installRecommendedPack()
-            _ = installed
+            let installed: OfflineTilePack
+            if reachability.isOnline {
+                installed = try await tileStore.installRecommendedPack()
+            } else {
+                installed = try tileStore.installBundledStarterPack()
+            }
             updateBaseLayerForConnectivity()
             tileImportMessage = "Installed \(installed.name)."
         } catch {
@@ -2270,17 +2289,28 @@ private struct BusinessEditorSheet: View {
                     }
                 }
 
-	                Section("Offline Maps") {
-	                    if let pack = tileStore.availablePack {
-	                        Text("Installed: \(pack.name)")
-	                        Text("Size: \(formatSize(pack.sizeBytes))")
-	                            .font(.caption)
-	                            .foregroundStyle(.secondary)
-	                        if advancedSettingsEnabled {
-	                            Text("Zoom: \(pack.minZoom)–\(pack.maxZoom)")
-	                                .font(.caption)
-	                                .foregroundStyle(.secondary)
-	                            if let bounds = pack.bounds {
+                Section("Offline Maps") {
+                    if let pack = tileStore.availablePack {
+                        Text("Installed: \(pack.name)")
+                        Text("Size: \(formatSize(pack.sizeBytes))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if tileStore.isBundledStarterSelected {
+                            Text("Starter pack is limited. Connect to a network to download full offline maps.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button(installingOfflineMaps ? "Upgrading..." : "Upgrade Offline Maps") {
+                                Task {
+                                    await installOfflineMaps()
+                                }
+                            }
+                            .disabled(!reachability.isOnline || installingOfflineMaps)
+                        }
+                        if advancedSettingsEnabled {
+                            Text("Zoom: \(pack.minZoom)–\(pack.maxZoom)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let bounds = pack.bounds {
 	                                Text("Bounds: \(format(bounds.minLat)),\(format(bounds.minLon)) → \(format(bounds.maxLat)),\(format(bounds.maxLon))")
 	                                    .font(.caption)
 	                                    .foregroundStyle(.secondary)
@@ -2297,19 +2327,21 @@ private struct BusinessEditorSheet: View {
 	                                Text("Remove Offline Maps")
 	                            }
 	                        }
-	                    } else {
-	                        Text("Not installed")
-	                            .foregroundStyle(.secondary)
-	                        Text("Install once so Semay stays useful when the internet is down.")
-	                            .font(.caption)
-	                            .foregroundStyle(.secondary)
-	
-	                        Button(installingOfflineMaps ? "Installing..." : "Install Offline Maps") {
-	                            Task {
-	                                await installOfflineMaps()
-	                            }
-	                        }
-	                        .disabled(!reachability.isOnline || installingOfflineMaps)
+                    } else {
+                        Text("Not installed")
+                            .foregroundStyle(.secondary)
+                        Text(reachability.isOnline
+                             ? "Install once so Semay stays useful when the internet is down."
+                             : "Install the starter map now, and upgrade later when online.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button(installingOfflineMaps ? "Installing..." : "Install Offline Maps") {
+                            Task {
+                                await installOfflineMaps()
+                            }
+                        }
+                        .disabled((!reachability.isOnline && !tileStore.canInstallBundledStarterPack) || installingOfflineMaps)
 	
 	                        if !offlineMapsNotice.isEmpty {
 	                            Text(offlineMapsNotice)
@@ -2456,7 +2488,12 @@ private struct BusinessEditorSheet: View {
 	        defer { installingOfflineMaps = false }
 	
 	        do {
-	            let installed = try await tileStore.installRecommendedPack()
+	            let installed: OfflineTilePack
+	            if reachability.isOnline {
+	                installed = try await tileStore.installRecommendedPack()
+	            } else {
+	                installed = try tileStore.installBundledStarterPack()
+	            }
 	            offlineMapsNotice = "Installed \(installed.name)."
 	        } catch {
 	            offlineMapsError = error.localizedDescription

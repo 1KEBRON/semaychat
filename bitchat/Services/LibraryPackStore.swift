@@ -4,6 +4,9 @@ import Foundation
 private let hubBaseURLKey = "semay.hub.base_url"
 private let hubIngestTokenKey = "semay.hub.ingest_token"
 private let libraryDirectoryName = "library"
+private let librarySeededStarterKey = "semay.library.seededStarter"
+private let bundledStarterLibraryName = "semay-starter-library"
+private let bundledStarterLibraryExtension = "json"
 private let defaultHubCandidates = [
     "https://hub.semay.app",
     "http://semayhub.local:5000",
@@ -107,7 +110,14 @@ final class LibraryPackStore: ObservableObject {
     }
 
     func refresh() {
-        let discovered = discoverPacks()
+        var discovered = discoverPacks()
+        if discovered.isEmpty && !UserDefaults.standard.bool(forKey: librarySeededStarterKey) {
+            // Seed a tiny starter library from the app bundle so Explore > Library is useful offline.
+            if (try? installBundledStarterPackToDocuments()) != nil {
+                UserDefaults.standard.set(true, forKey: librarySeededStarterKey)
+            }
+            discovered = discoverPacks()
+        }
         packs = discovered
         items = discovered.flatMap { $0.manifest.items }
     }
@@ -213,6 +223,24 @@ final class LibraryPackStore: ObservableObject {
         let dir = docs.appendingPathComponent(libraryDirectoryName, isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    private func bundledStarterPackURL() -> URL? {
+        Bundle.main.url(forResource: bundledStarterLibraryName, withExtension: bundledStarterLibraryExtension)
+    }
+
+    private func installBundledStarterPackToDocuments() throws -> URL {
+        guard let sourceURL = bundledStarterPackURL() else {
+            throw NSError(
+                domain: "LibraryPackStore",
+                code: 17,
+                userInfo: [NSLocalizedDescriptionKey: "Bundled starter library is unavailable"]
+            )
+        }
+        return try copyPackToLocalStorage(
+            from: sourceURL,
+            preferredName: "\(bundledStarterLibraryName).\(bundledStarterLibraryExtension)"
+        )
     }
 
     private func copyPackToLocalStorage(from sourceURL: URL, preferredName: String) throws -> URL {
