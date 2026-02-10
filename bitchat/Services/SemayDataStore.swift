@@ -1,5 +1,6 @@
 import BitLogger
 import Foundation
+import P256K
 import SQLite3
 
 @MainActor
@@ -291,23 +292,99 @@ final class SemayDataStore: ObservableObject {
 
     // MARK: - Promise Ledger
 
+    private struct PromiseNoteSigningPayload: Codable {
+        let promiseID: String
+        let merchantID: String
+        let payerPubkey: String
+        let amountMsat: UInt64
+        let currency: String
+        let expiresAt: Int
+        let nonce: String
+
+        enum CodingKeys: String, CodingKey {
+            case promiseID = "promise_id"
+            case merchantID = "merchant_id"
+            case payerPubkey = "payer_pubkey"
+            case amountMsat = "amount_msat"
+            case currency
+            case expiresAt = "expires_at"
+            case nonce
+        }
+    }
+
+    private struct SettlementReceiptSigningPayload: Codable {
+        let receiptID: String
+        let promiseID: String
+        let proofType: String
+        let proofValue: String
+        let submittedBy: String
+        let submittedAt: Int
+
+        enum CodingKeys: String, CodingKey {
+            case receiptID = "receipt_id"
+            case promiseID = "promise_id"
+            case proofType = "proof_type"
+            case proofValue = "proof_value"
+            case submittedBy = "submitted_by"
+            case submittedAt = "submitted_at"
+        }
+    }
+
+    private func schnorrSignHex(messageHash: Data, identity: NostrIdentity) -> String? {
+        guard messageHash.count == 32 else { return nil }
+        do {
+            let key = try identity.schnorrSigningKey()
+            var messageBytes = [UInt8](messageHash)
+            var auxRand = [UInt8](repeating: 0, count: 32)
+            _ = auxRand.withUnsafeMutableBytes { ptr in
+                SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
+            }
+            let sig = try key.signature(message: &messageBytes, auxiliaryRand: &auxRand)
+            return sig.dataRepresentation.hexEncodedString()
+        } catch {
+            return nil
+        }
+    }
+
+    private func canonicalJSONHash<T: Encodable>(_ value: T) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = (try? encoder.encode(value)) ?? Data()
+        return data.sha256Hash()
+    }
+
     @discardableResult
     func createPromise(merchantID: String, amountMsat: UInt64, fiatQuote: String? = nil) -> PromiseNote {
         let now = Int(Date().timeIntervalSince1970)
         let expiry = PromiseNote.defaultExpiry()
-        let payer = currentAuthorPubkey()
+        let payerIdentity = try? idBridge.getCurrentNostrIdentity()
+        let payer = payerIdentity?.publicKeyHex.lowercased() ?? currentAuthorPubkey()
 
         let nonce = Data((0..<32).map { _ in UInt8.random(in: 0...255) }).hexEncodedString()
-        let pseudoSig = SemayEventEnvelope.pseudoSign(payloadHash: nonce, authorPubkey: payer)
+        let signaturePayload = PromiseNoteSigningPayload(
+            promiseID: UUID().uuidString.lowercased(),
+            merchantID: merchantID,
+            payerPubkey: payer,
+            amountMsat: amountMsat,
+            currency: "BTC_LN",
+            expiresAt: expiry,
+            nonce: nonce
+        )
+        let payerSignature = payerIdentity.flatMap { schnorrSignHex(messageHash: canonicalJSONHash(signaturePayload), identity: $0) }
+            ?? SemayEventEnvelope.pseudoSign(payloadHash: nonce, authorPubkey: payer)
+
+        // Use the same promise_id for the note and its signature payload.
+        let promiseID = signaturePayload.promiseID
 
         let note = PromiseNote(
+            promiseID: promiseID,
             merchantID: merchantID,
             payerPubkey: payer,
             amountMsat: amountMsat,
             fiatQuote: fiatQuote,
             expiresAt: expiry,
             nonce: nonce,
-            payerSignature: pseudoSig,
+            payerSignature: payerSignature,
             status: .pending,
             createdAt: now,
             updatedAt: now
@@ -384,15 +461,28 @@ final class SemayDataStore: ObservableObject {
         }
         guard let resolvedPromise = promise else { return nil }
 
-        let author = currentAuthorPubkey()
-        let proofHash = Data(proofValue.utf8).sha256Hash().hexEncodedString()
-        let sig = SemayEventEnvelope.pseudoSign(payloadHash: proofHash, authorPubkey: author)
+        let identity = try? idBridge.getCurrentNostrIdentity()
+        let author = identity?.publicKeyHex.lowercased() ?? currentAuthorPubkey()
+
+        let receiptID = UUID().uuidString.lowercased()
+        let payload = SettlementReceiptSigningPayload(
+            receiptID: receiptID,
+            promiseID: promiseID,
+            proofType: proofType.rawValue,
+            proofValue: proofValue,
+            submittedBy: submittedBy.rawValue,
+            submittedAt: Int(Date().timeIntervalSince1970)
+        )
+        let sig = identity.flatMap { schnorrSignHex(messageHash: canonicalJSONHash(payload), identity: $0) }
+            ?? SemayEventEnvelope.pseudoSign(payloadHash: Data(proofValue.utf8).sha256Hash().hexEncodedString(), authorPubkey: author)
 
         let receipt = SettlementReceipt(
+            receiptID: receiptID,
             promiseID: promiseID,
             proofType: proofType,
             proofValue: proofValue,
             submittedBy: submittedBy,
+            submittedAt: payload.submittedAt,
             submitterSignature: sig
         )
 
