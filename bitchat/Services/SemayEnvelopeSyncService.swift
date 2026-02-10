@@ -12,6 +12,8 @@ final class SemayEnvelopeSyncService: ObservableObject {
 
     private var timer: Timer?
     private let intervalSeconds: TimeInterval = 20
+    private let feedIntervalSeconds: TimeInterval = 60
+    private var lastFeedSyncAt: Date?
 
     private init() {}
 
@@ -37,15 +39,27 @@ final class SemayEnvelopeSyncService: ObservableObject {
         isSyncing = true
         defer { isSyncing = false }
 
-        let report = await SemayDataStore.shared.syncOutboxToHub()
+        let pushReport = await SemayDataStore.shared.syncOutboxToHub()
+        var feedReport: SemayDataStore.FeedSyncReport?
+        let now = Date()
+        if lastFeedSyncAt == nil || now.timeIntervalSince(lastFeedSyncAt ?? .distantPast) >= feedIntervalSeconds {
+            feedReport = await SemayDataStore.shared.syncFeedFromHub()
+            lastFeedSyncAt = now
+        }
         lastSyncAt = Date()
-        lastSummary = report.summary
-        lastError = report.errorMessage
+        if let feedReport {
+            lastSummary = "push: \(pushReport.summary) | pull: \(feedReport.summary)"
+        } else {
+            lastSummary = "push: \(pushReport.summary)"
+        }
 
-        if let error = report.errorMessage {
+        let errors = [pushReport.errorMessage, feedReport?.errorMessage].compactMap { $0 }.filter { !$0.isEmpty }
+        lastError = errors.isEmpty ? nil : errors.joined(separator: " | ")
+
+        if let error = lastError {
             SecureLogger.warning("Semay envelope sync warning: \(error)", category: .session)
-        } else if report.attempted > 0 {
-            SecureLogger.info("Semay envelope sync: \(report.summary)", category: .session)
+        } else if pushReport.attempted > 0 || (feedReport?.applied ?? 0) > 0 {
+            SecureLogger.info("Semay envelope sync: \(lastSummary ?? "")", category: .session)
         }
     }
 }

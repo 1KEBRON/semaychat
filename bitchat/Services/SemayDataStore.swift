@@ -88,6 +88,17 @@ final class SemayDataStore: ObservableObject {
         }
     }
 
+    struct FeedSyncReport {
+        var fetched: Int = 0
+        var applied: Int = 0
+        var skipped: Int = 0
+        var errorMessage: String?
+
+        var summary: String {
+            "fetched \(fetched), applied \(applied), skipped \(skipped)"
+        }
+    }
+
     @Published private(set) var pins: [SemayMapPin] = []
     @Published private(set) var businesses: [BusinessProfile] = []
     @Published private(set) var promises: [PromiseNote] = []
@@ -155,6 +166,7 @@ final class SemayDataStore: ObservableObject {
             "pin_id": pinID,
             "name": name,
             "type": type,
+            "details": details,
             "latitude": String(latitude),
             "longitude": String(longitude),
             "plus_code": plusCode,
@@ -263,6 +275,8 @@ final class SemayDataStore: ObservableObject {
             payload: [
                 "business_id": businessID,
                 "name": name,
+                "category": category,
+                "details": details,
                 "latitude": String(latitude),
                 "longitude": String(longitude),
                 "plus_code": plusCode,
@@ -688,6 +702,97 @@ final class SemayDataStore: ObservableObject {
         return report
     }
 
+    func syncFeedFromHub(limit: Int = 200) async -> FeedSyncReport {
+        var report = FeedSyncReport()
+
+        var baseURL = hubBaseURLString()
+        if baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            do {
+                _ = try await OfflineTileStore.shared.discoverMapSourceURL()
+            } catch {
+                report.errorMessage = error.localizedDescription
+                return report
+            }
+            baseURL = hubBaseURLString()
+        }
+
+        guard let root = URL(string: baseURL) else {
+            report.errorMessage = "node-url-missing-or-invalid"
+            return report
+        }
+
+        let cursorKey = "hub.feed.seq.v1"
+        let currentCursor = Int(loadSyncCursor(key: cursorKey) ?? "0") ?? 0
+        let safeLimit = max(1, min(limit, 500))
+
+        var components = URLComponents(
+            url: root
+                .appendingPathComponent("chat")
+                .appendingPathComponent("api")
+                .appendingPathComponent("envelopes")
+                .appendingPathComponent("feed"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "cursor", value: String(currentCursor)),
+            URLQueryItem(name: "limit", value: String(safeLimit)),
+        ]
+        guard let url = components?.url else {
+            report.errorMessage = "invalid-feed-url"
+            return report
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+
+        let token = hubIngestToken().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                report.errorMessage = "hub-feed-bad-response"
+                return report
+            }
+            guard (200...299).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                report.errorMessage = "hub-feed-http-\(http.statusCode):\(body)"
+                return report
+            }
+
+            let decoded = try JSONDecoder().decode(HubFeedResponse.self, from: data)
+            report.fetched = decoded.events.count
+
+            var maxSeq = currentCursor
+            for item in decoded.events {
+                maxSeq = max(maxSeq, item.seq)
+                let envelope = item.envelope
+                if let failure = envelope.validate() {
+                    report.skipped += 1
+                    SecureLogger.warning("Hub feed envelope rejected: \(failure.category.rawValue):\(failure.reason)", category: .session)
+                    continue
+                }
+                if applyInboundEnvelope(envelope) {
+                    report.applied += 1
+                } else {
+                    report.skipped += 1
+                }
+            }
+
+            let nextCursor = max(maxSeq, decoded.nextCursor)
+            saveSyncCursor(key: cursorKey, value: String(nextCursor))
+
+            refreshAll()
+            return report
+        } catch {
+            report.errorMessage = String(describing: error)
+            return report
+        }
+    }
+
     func fetchHubMetrics(windowSeconds: Int = 24 * 60 * 60) async throws -> HubIngestMetrics {
         var endpointURL = makeHubMetricsEndpointURL(windowSeconds: windowSeconds)
         if endpointURL == nil {
@@ -884,6 +989,23 @@ final class SemayDataStore: ObservableObject {
         let success: Bool
         let accepted: [Accepted]
         let rejected: [Rejected]
+    }
+
+    private struct HubFeedResponse: Decodable {
+        struct Item: Decodable {
+            let seq: Int
+            let envelope: SemayEventEnvelope
+        }
+
+        let success: Bool
+        let nextCursor: Int
+        let events: [Item]
+
+        enum CodingKeys: String, CodingKey {
+            case success
+            case nextCursor = "next_cursor"
+            case events
+        }
     }
 
     // MARK: - Private helpers
@@ -1437,6 +1559,156 @@ final class SemayDataStore: ObservableObject {
         }
 
         return "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+
+    private func loadSyncCursor(key: String) -> String? {
+        let rows = query(
+            "SELECT cursor_value FROM sync_cursor WHERE key = ? LIMIT 1",
+            binds: [.text(key)]
+        )
+        return rows.first?["cursor_value"] as? String
+    }
+
+    private func saveSyncCursor(key: String, value: String) {
+        let now = Int(Date().timeIntervalSince1970)
+        _ = execute(
+            """
+            INSERT INTO sync_cursor (key, cursor_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                cursor_value = excluded.cursor_value,
+                updated_at = excluded.updated_at
+            """,
+            binds: [.text(key), .text(value), .int(now)]
+        )
+    }
+
+    private func applyInboundEnvelope(_ envelope: SemayEventEnvelope) -> Bool {
+        switch envelope.eventType {
+        case .pinCreate, .pinUpdate:
+            return applyInboundPin(envelope)
+        case .pinApproval:
+            return applyInboundPinApproval(envelope)
+        case .businessRegister:
+            return applyInboundBusiness(envelope)
+        case .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage:
+            return false
+        }
+    }
+
+    private func applyInboundPin(_ envelope: SemayEventEnvelope) -> Bool {
+        let payload = envelope.payload
+        guard let pinID = payload["pin_id"], !pinID.isEmpty else { return false }
+        guard let name = payload["name"] else { return false }
+        let type = payload["type"] ?? ""
+        let details = payload["details"] ?? ""
+        guard let lat = Double(payload["latitude"] ?? ""),
+              let lon = Double(payload["longitude"] ?? "") else { return false }
+
+        let address = SemayAddress.eAddress(latitude: lat, longitude: lon)
+        let plusCode = (payload["plus_code"] ?? "").isEmpty ? address.plusCode : (payload["plus_code"] ?? "")
+        let eAddress = (payload["e_address"] ?? "").isEmpty ? address.eAddress : (payload["e_address"] ?? "")
+        let phone = payload["phone"] ?? ""
+        let author = envelope.authorPubkey.lowercased()
+        let ts = envelope.createdAt
+
+        let sql = """
+        INSERT INTO pins (
+            pin_id, name, type, details, latitude, longitude, plus_code, e_address, phone,
+            author_pubkey, approval_count, is_visible, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+        ON CONFLICT(pin_id) DO UPDATE SET
+            name = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.name ELSE pins.name END,
+            type = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.type ELSE pins.type END,
+            details = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.details ELSE pins.details END,
+            latitude = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.latitude ELSE pins.latitude END,
+            longitude = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.longitude ELSE pins.longitude END,
+            plus_code = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.plus_code ELSE pins.plus_code END,
+            e_address = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.e_address ELSE pins.e_address END,
+            phone = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.phone ELSE pins.phone END,
+            author_pubkey = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.author_pubkey ELSE pins.author_pubkey END,
+            updated_at = CASE WHEN excluded.updated_at >= pins.updated_at THEN excluded.updated_at ELSE pins.updated_at END
+        """
+
+        return execute(
+            sql,
+            binds: [
+                .text(pinID), .text(name), .text(type), .text(details),
+                .double(lat), .double(lon), .text(plusCode), .text(eAddress), .text(phone),
+                .text(author), .int(ts), .int(ts)
+            ]
+        )
+    }
+
+    private func applyInboundPinApproval(_ envelope: SemayEventEnvelope) -> Bool {
+        let payload = envelope.payload
+        guard let pinID = payload["pin_id"], !pinID.isEmpty else { return false }
+        let approver = (payload["approver_pubkey"] ?? envelope.authorPubkey).lowercased()
+        let now = envelope.createdAt
+
+        let insert = """
+        INSERT OR IGNORE INTO pin_approvals (pin_id, approver_pubkey, distance_meters, created_at)
+        VALUES (?, ?, ?, ?)
+        """
+        _ = execute(insert, binds: [.text(pinID), .text(approver), .double(250.0), .int(now)])
+
+        let count = queryInt(
+            "SELECT COUNT(1) FROM pin_approvals WHERE pin_id = ?",
+            binds: [.text(pinID)]
+        )
+        let visible = count >= 2 ? 1 : 0
+        let update = """
+        UPDATE pins
+        SET approval_count = ?, is_visible = ?, updated_at = ?
+        WHERE pin_id = ?
+        """
+        return execute(update, binds: [.int(count), .int(visible), .int(now), .text(pinID)])
+    }
+
+    private func applyInboundBusiness(_ envelope: SemayEventEnvelope) -> Bool {
+        let payload = envelope.payload
+        guard let businessID = payload["business_id"], !businessID.isEmpty else { return false }
+        guard let name = payload["name"] else { return false }
+        let category = payload["category"] ?? ""
+        let details = payload["details"] ?? ""
+        guard let lat = Double(payload["latitude"] ?? ""),
+              let lon = Double(payload["longitude"] ?? "") else { return false }
+
+        let address = SemayAddress.eAddress(latitude: lat, longitude: lon)
+        let plusCode = (payload["plus_code"] ?? "").isEmpty ? address.plusCode : (payload["plus_code"] ?? "")
+        let eAddress = (payload["e_address"] ?? "").isEmpty ? address.eAddress : (payload["e_address"] ?? "")
+        let phone = payload["phone"] ?? ""
+        let owner = envelope.authorPubkey.lowercased()
+        let qrPayload = "semay://business/\(businessID)"
+        let ts = envelope.createdAt
+
+        let sql = """
+        INSERT INTO business_profiles (
+            business_id, name, category, details, latitude, longitude, plus_code, e_address, phone,
+            owner_pubkey, qr_payload, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(business_id) DO UPDATE SET
+            name = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.name ELSE business_profiles.name END,
+            category = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.category ELSE business_profiles.category END,
+            details = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.details ELSE business_profiles.details END,
+            latitude = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.latitude ELSE business_profiles.latitude END,
+            longitude = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.longitude ELSE business_profiles.longitude END,
+            plus_code = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.plus_code ELSE business_profiles.plus_code END,
+            e_address = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.e_address ELSE business_profiles.e_address END,
+            phone = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.phone ELSE business_profiles.phone END,
+            owner_pubkey = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.owner_pubkey ELSE business_profiles.owner_pubkey END,
+            qr_payload = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.qr_payload ELSE business_profiles.qr_payload END,
+            updated_at = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.updated_at ELSE business_profiles.updated_at END
+        """
+
+        return execute(
+            sql,
+            binds: [
+                .text(businessID), .text(name), .text(category), .text(details),
+                .double(lat), .double(lon), .text(plusCode), .text(eAddress), .text(phone),
+                .text(owner), .text(qrPayload), .int(ts), .int(ts)
+            ]
+        )
     }
 
 }
