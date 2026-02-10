@@ -9,8 +9,11 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 private let defaultHubCandidates = [
     "https://hub.semay.app",
     "http://semayhub.local:5000",
+    "http://semayhub.local:5055",
     "http://localhost:5000",
+    "http://localhost:5055",
     "http://127.0.0.1:5000",
+    "http://127.0.0.1:5055",
 ]
 
 struct OfflineTilePack: Equatable {
@@ -101,6 +104,12 @@ final class OfflineTileStore: ObservableObject {
         refresh()
     }
 
+    func reloadSourceConfig() {
+        activeMapSourceBaseURL = configuredHubBaseURL()?.absoluteString
+        activeNodeName = nil
+        cachedNodeDescriptor = nil
+    }
+
     func refresh() {
         let discovered = discoverPacks()
         packs = discovered
@@ -188,6 +197,35 @@ final class OfflineTileStore: ObservableObject {
         refresh()
         selectPack(installed)
         return installed
+    }
+
+    @discardableResult
+    func installRecommendedPack() async throws -> OfflineTilePack {
+        let packs = try await fetchHubCatalog()
+        guard let preferred = Self.preferredCommunityPack(from: packs) else {
+            throw NSError(
+                domain: "OfflineTileStore",
+                code: 40,
+                userInfo: [NSLocalizedDescriptionKey: "No offline maps are available right now."]
+            )
+        }
+        return try await installHubPack(preferred)
+    }
+
+    func deletePack(_ pack: OfflineTilePack) {
+        do {
+            try FileManager.default.removeItem(atPath: pack.path)
+        } catch {
+            // Ignore delete failures; refresh anyway.
+        }
+        refresh()
+    }
+
+    func deleteAllPacks() {
+        for pack in packs {
+            try? FileManager.default.removeItem(atPath: pack.path)
+        }
+        refresh()
     }
 
     @discardableResult
@@ -379,6 +417,19 @@ final class OfflineTileStore: ObservableObject {
             hasher.update(data: data)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func preferredCommunityPack(from packs: [HubTilePack]) -> HubTilePack? {
+        if let combined = packs.first(where: {
+            let n = $0.name.lowercased()
+            return n.contains("eritrea") && n.contains("ethiopia")
+        }) {
+            return combined
+        }
+        if let horn = packs.first(where: { $0.name.lowercased().contains("horn") }) {
+            return horn
+        }
+        return packs.first
     }
 
     private func resolveHubBaseURL(forceDiscovery: Bool = false) async throws -> URL {

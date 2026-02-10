@@ -289,7 +289,7 @@ private struct SemayMapTabView: View {
                             Text(reachability.isOnline ? "Offline maps not installed" : "Offline maps not installed")
                                 .font(.caption)
                                 .fontWeight(.semibold)
-                            Text(reachability.isOnline ? "One tap download for Eritrea + Ethiopia." : "Connect to the internet to download offline maps.")
+                            Text(reachability.isOnline ? "One tap download for Eritrea + Ethiopia." : "Connect to a network to download offline maps.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -715,31 +715,13 @@ private struct SemayMapTabView: View {
         installingCommunityPack = true
         defer { installingCommunityPack = false }
         do {
-            let hubPacks = try await tileStore.fetchHubCatalog()
-            guard let preferred = preferredCommunityPack(from: hubPacks) else {
-                tileImportMessage = "No offline maps are available right now."
-                return
-            }
-            let installed = try await tileStore.installHubPack(preferred)
+            let installed = try await tileStore.installRecommendedPack()
             useOfflineTiles = true
             useOSMBaseMap = false
             tileImportMessage = "Installed \(installed.name)."
         } catch {
             tileImportMessage = error.localizedDescription
         }
-    }
-
-    private func preferredCommunityPack(from packs: [HubTilePack]) -> HubTilePack? {
-        if let combined = packs.first(where: {
-            let n = $0.name.lowercased()
-            return n.contains("eritrea") && n.contains("ethiopia")
-        }) {
-            return combined
-        }
-        if let horn = packs.first(where: { $0.name.lowercased().contains("horn") }) {
-            return horn
-        }
-        return packs.first
     }
 }
 
@@ -2049,28 +2031,32 @@ private struct BusinessEditorSheet: View {
     }
 }
 
-private struct SemayMeTabView: View {
-    @EnvironmentObject private var dataStore: SemayDataStore
-    @EnvironmentObject private var seedService: SeedPhraseService
-    @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
-    @StateObject private var safety = SafetyModeService.shared
-    @StateObject private var envelopeSync = SemayEnvelopeSyncService.shared
-    @StateObject private var tileStore = OfflineTileStore.shared
-
-    @State private var revealPhrase = false
-    @State private var showRestoreSeed = false
-    @State private var hubBaseURL = ""
-    @State private var hubToken = ""
+	private struct SemayMeTabView: View {
+	    @EnvironmentObject private var dataStore: SemayDataStore
+	    @EnvironmentObject private var seedService: SeedPhraseService
+	    @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
+	    @StateObject private var safety = SafetyModeService.shared
+	    @StateObject private var envelopeSync = SemayEnvelopeSyncService.shared
+	    @StateObject private var tileStore = OfflineTileStore.shared
+	    @StateObject private var reachability = NetworkReachabilityService.shared
+	
+	    @State private var revealPhrase = false
+	    @State private var showRestoreSeed = false
+	    @State private var hubBaseURL = ""
+	    @State private var hubToken = ""
     @State private var loadingHubMetrics = false
     @State private var hubMetricsSummary = ""
     @State private var hubMetricsError = ""
-    @State private var discoveringHub = false
-    @State private var hubDiscoveryNotice = ""
-    @State private var showPackInfo = false
-
-    var body: some View {
-        NavigationStack {
-            Form {
+	    @State private var discoveringHub = false
+	    @State private var hubDiscoveryNotice = ""
+	    @State private var showPackInfo = false
+	    @State private var installingOfflineMaps = false
+	    @State private var offlineMapsNotice = ""
+	    @State private var offlineMapsError = ""
+	
+	    var body: some View {
+	        NavigationStack {
+	            Form {
                 Section("Security") {
                     Toggle("Safe Mode", isOn: Binding(
                         get: { safety.safeModeEnabled },
@@ -2138,40 +2124,87 @@ private struct SemayMeTabView: View {
                     }
                 }
 
-                Section("Offline Map") {
-                    if let pack = tileStore.availablePack {
-                        Text("Offline map: \(pack.name)")
-                        Text("Zoom: \(pack.minZoom)–\(pack.maxZoom)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if let bounds = pack.bounds {
-                            Text("Bounds: \(format(bounds.minLat)),\(format(bounds.minLon)) → \(format(bounds.maxLat)),\(format(bounds.maxLon))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("Size: \(formatSize(pack.sizeBytes))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("Manage Offline Maps") {
-                            showPackInfo = true
-                        }
-                    } else {
-                        Text("No offline map installed.")
-                            .foregroundStyle(.secondary)
-                        Button("Manage Offline Maps") {
-                            showPackInfo = true
-                        }
-                    }
-                }
+	                Section("Offline Maps") {
+	                    if let pack = tileStore.availablePack {
+	                        Text("Installed: \(pack.name)")
+	                        Text("Size: \(formatSize(pack.sizeBytes))")
+	                            .font(.caption)
+	                            .foregroundStyle(.secondary)
+	                        if advancedSettingsEnabled {
+	                            Text("Zoom: \(pack.minZoom)–\(pack.maxZoom)")
+	                                .font(.caption)
+	                                .foregroundStyle(.secondary)
+	                            if let bounds = pack.bounds {
+	                                Text("Bounds: \(format(bounds.minLat)),\(format(bounds.minLon)) → \(format(bounds.maxLat)),\(format(bounds.maxLon))")
+	                                    .font(.caption)
+	                                    .foregroundStyle(.secondary)
+	                            }
+	                        }
+	                        if advancedSettingsEnabled {
+	                            Button("Manage Offline Maps") {
+	                                showPackInfo = true
+	                            }
+	                        } else {
+	                            Button(role: .destructive) {
+	                                tileStore.deleteAllPacks()
+	                            } label: {
+	                                Text("Remove Offline Maps")
+	                            }
+	                        }
+	                    } else {
+	                        Text("Not installed")
+	                            .foregroundStyle(.secondary)
+	                        Text("Install once so Semay stays useful when the internet is down.")
+	                            .font(.caption)
+	                            .foregroundStyle(.secondary)
+	
+	                        Button(installingOfflineMaps ? "Installing..." : "Install Offline Maps") {
+	                            Task {
+	                                await installOfflineMaps()
+	                            }
+	                        }
+	                        .disabled(!reachability.isOnline || installingOfflineMaps)
+	
+	                        if !offlineMapsNotice.isEmpty {
+	                            Text(offlineMapsNotice)
+	                                .font(.caption)
+	                                .foregroundStyle(.secondary)
+	                        }
+	                        if !offlineMapsError.isEmpty {
+	                            Text(offlineMapsError)
+	                                .font(.caption)
+	                                .foregroundStyle(.orange)
+	                        }
+	
+	                        if advancedSettingsEnabled {
+	                            Button("Manage Offline Maps") {
+	                                showPackInfo = true
+	                            }
+	                        }
+	                    }
+	                }
 
-                if advancedSettingsEnabled {
-                    Section("Backbone Node (Advanced)") {
-                        TextField("Node Base URL", text: $hubBaseURL)
-                            .semayDisableAutoCaps()
-                            .semayDisableAutocorrection()
-                        SecureField("Node Token (Optional)", text: $hubToken)
-                            .semayDisableAutoCaps()
-                            .semayDisableAutocorrection()
+	                if advancedSettingsEnabled {
+	                    Section("Node (Advanced)") {
+	                        Text("Leave this blank to auto-detect a nearby node. Set it only if you're operating your own Semay node.")
+	                            .font(.caption)
+	                            .foregroundStyle(.secondary)
+	                        if let nodeName = tileStore.activeNodeName, !nodeName.isEmpty {
+	                            Text("Connected node: \(nodeName)")
+	                                .font(.caption)
+	                                .foregroundStyle(.secondary)
+	                        }
+	                        if let activeURL = tileStore.activeMapSourceBaseURL, !activeURL.isEmpty {
+	                            Text("Node URL: \(activeURL)")
+	                                .font(.caption2)
+	                                .foregroundStyle(.secondary)
+	                        }
+	                        TextField("Node Base URL (Optional)", text: $hubBaseURL)
+	                            .semayDisableAutoCaps()
+	                            .semayDisableAutocorrection()
+	                        SecureField("Node Token (Optional)", text: $hubToken)
+	                            .semayDisableAutoCaps()
+	                            .semayDisableAutocorrection()
                         Button(discoveringHub ? "Detecting Node..." : "Auto-Detect Node") {
                             Task {
                                 discoveringHub = true
@@ -2188,10 +2221,17 @@ private struct SemayMeTabView: View {
                                 }
                             }
                         }
-                        .disabled(discoveringHub)
-                        Button("Save Node Settings") {
-                            dataStore.saveHubConfig(baseURL: hubBaseURL, token: hubToken)
-                        }
+	                        .disabled(discoveringHub)
+	                        Button("Reset To Auto") {
+	                            hubBaseURL = ""
+	                            hubToken = ""
+	                            dataStore.saveHubConfig(baseURL: "", token: "")
+	                            tileStore.reloadSourceConfig()
+	                        }
+	                        Button("Save Node Settings") {
+	                            dataStore.saveHubConfig(baseURL: hubBaseURL, token: hubToken)
+	                            tileStore.reloadSourceConfig()
+	                        }
                         Button("Refresh") {
                             dataStore.refreshAll()
                         }
@@ -2256,13 +2296,27 @@ private struct SemayMeTabView: View {
         String(format: "%.4f", value)
     }
 
-    private func formatSize(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB, .useGB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
-}
+	    private func formatSize(_ bytes: Int64) -> String {
+	        let formatter = ByteCountFormatter()
+	        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+	        formatter.countStyle = .file
+	        return formatter.string(fromByteCount: bytes)
+	    }
+	
+	    private func installOfflineMaps() async {
+	        installingOfflineMaps = true
+	        offlineMapsNotice = ""
+	        offlineMapsError = ""
+	        defer { installingOfflineMaps = false }
+	
+	        do {
+	            let installed = try await tileStore.installRecommendedPack()
+	            offlineMapsNotice = "Installed \(installed.name)."
+	        } catch {
+	            offlineMapsError = error.localizedDescription
+	        }
+	    }
+	}
 
 private struct SemayRestoreSeedSheet: View {
     @Binding var isPresented: Bool

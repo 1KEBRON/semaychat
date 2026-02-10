@@ -7,8 +7,11 @@ private let libraryDirectoryName = "library"
 private let defaultHubCandidates = [
     "https://hub.semay.app",
     "http://semayhub.local:5000",
+    "http://semayhub.local:5055",
     "http://localhost:5000",
+    "http://localhost:5055",
     "http://127.0.0.1:5000",
+    "http://127.0.0.1:5055",
 ]
 
 struct HubLibraryPack: Decodable, Equatable, Identifiable {
