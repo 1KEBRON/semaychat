@@ -1450,6 +1450,27 @@ private struct SemayExploreSheet: View {
                 .padding(.top, 12)
 
                 List {
+                    if let jump = plusCodeJump {
+                        Section {
+                            Button {
+                                selectedPinID = nil
+                                selectedBusinessID = nil
+                                focus(area: jump.area)
+                                isPresented = false
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Go to \(jump.code)")
+                                        .font(.headline)
+                                    Text("Jump to location from Plus Code")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        } header: {
+                            Text("Location")
+                        }
+                    }
+
                     switch segment {
                     case .places:
                         placesSection
@@ -1480,6 +1501,15 @@ private struct SemayExploreSheet: View {
 
     private var normalizedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var plusCodeJump: (code: String, area: OpenLocationCode.Area)? {
+        let raw = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        let compact = raw.uppercased().filter { !$0.isWhitespace }
+        guard let area = OpenLocationCode.decode(compact) else { return nil }
+        let canonical = OpenLocationCode.encode(latitude: area.centerLatitude, longitude: area.centerLongitude, codeLength: 10)
+        return (canonical, area)
     }
 
     private var filteredPins: [SemayMapPin] {
@@ -1644,6 +1674,16 @@ private struct SemayExploreSheet: View {
         region = MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
             span: MKCoordinateSpan(latitudeDelta: 0.06, longitudeDelta: 0.06)
+        )
+    }
+
+    private func focus(area: OpenLocationCode.Area) {
+        // 10-digit plus codes are already very precise; zoom out slightly for context.
+        let latSpan = max(0.02, area.latitudeSpan * 50.0)
+        let lonSpan = max(0.02, area.longitudeSpan * 50.0)
+        region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: area.centerLatitude, longitude: area.centerLongitude),
+            span: MKCoordinateSpan(latitudeDelta: latSpan, longitudeDelta: lonSpan)
         )
     }
 }

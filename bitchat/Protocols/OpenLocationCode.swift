@@ -22,6 +22,18 @@ enum OpenLocationCode {
         0.000125
     ]
 
+    struct Area: Equatable {
+        let latitudeLo: Double
+        let longitudeLo: Double
+        let latitudeHi: Double
+        let longitudeHi: Double
+
+        var centerLatitude: Double { (latitudeLo + latitudeHi) / 2.0 }
+        var centerLongitude: Double { (longitudeLo + longitudeHi) / 2.0 }
+        var latitudeSpan: Double { latitudeHi - latitudeLo }
+        var longitudeSpan: Double { longitudeHi - longitudeLo }
+    }
+
     static func encode(latitude: Double, longitude: Double, codeLength: Int = 10) -> String {
         // We implement full codes only. Enforce an even length between 2 and 10.
         let clampedLen: Int
@@ -86,5 +98,56 @@ enum OpenLocationCode {
         }
 
         return String(out)
+    }
+
+    /// Decode a full 10-digit plus code (e.g. "849VCWC8+R9") into its bounding area.
+    ///
+    /// - Supports only full codes (no short codes / padding).
+    /// - Accepts codes with or without the '+' separator.
+    static func decode(_ rawCode: String) -> Area? {
+        let trimmed = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Remove spaces and upper-case to match the canonical alphabet.
+        let compact = trimmed.uppercased().filter { !$0.isWhitespace }
+
+        var code = compact
+        if !code.contains(separator), code.count == 10 {
+            code = String(code.prefix(separatorPosition)) + String(separator) + String(code.suffix(2))
+        }
+
+        guard code.count == 11 else { return nil }
+        let chars = Array(code)
+        guard chars.count == 11, chars[separatorPosition] == separator else { return nil }
+
+        // Extract the 10 digits (strip separator).
+        let digits: [Character] = chars.enumerated().compactMap { idx, ch in
+            idx == separatorPosition ? nil : ch
+        }
+        guard digits.count == 10 else { return nil }
+
+        var lat = 0.0
+        var lon = 0.0
+        let pairCount = 5
+        for i in 0..<pairCount {
+            let latCh = digits[i * 2]
+            let lonCh = digits[i * 2 + 1]
+            guard let latDigit = alphabet.firstIndex(of: latCh),
+                  let lonDigit = alphabet.firstIndex(of: lonCh) else {
+                return nil
+            }
+            let placeValue = pairResolutions[i]
+            lat += Double(latDigit) * placeValue
+            lon += Double(lonDigit) * placeValue
+        }
+
+        let cellSize = pairResolutions[pairCount - 1]
+        let latLo = lat - 90.0
+        let lonLo = lon - 180.0
+        let latHi = latLo + cellSize
+        let lonHi = lonLo + cellSize
+
+        guard latLo >= -90.0, latHi <= 90.0, lonLo >= -180.0, lonHi <= 180.0 else { return nil }
+        return Area(latitudeLo: latLo, longitudeLo: lonLo, latitudeHi: latHi, longitudeHi: lonHi)
     }
 }

@@ -964,7 +964,7 @@ final class SemayDataStore: ObservableObject {
         if endpointURL == nil {
             // Auto-discover a reachable node when the user creates events but never touched Advanced settings.
             do {
-                _ = try await OfflineTileStore.shared.discoverMapSourceURL()
+                _ = try await SemayNodeDiscoveryService.shared.resolveBaseURL(forceDiscovery: true)
             } catch {
                 report.errorMessage = error.localizedDescription
                 return report
@@ -1082,7 +1082,7 @@ final class SemayDataStore: ObservableObject {
         var baseURL = hubBaseURLString()
         if baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             do {
-                _ = try await OfflineTileStore.shared.discoverMapSourceURL()
+                _ = try await SemayNodeDiscoveryService.shared.resolveBaseURL(forceDiscovery: true)
             } catch {
                 report.errorMessage = error.localizedDescription
                 return report
@@ -1171,7 +1171,7 @@ final class SemayDataStore: ObservableObject {
         var endpointURL = makeHubMetricsEndpointURL(windowSeconds: windowSeconds)
         if endpointURL == nil {
             // Best-effort discovery for operators who hit "Load Node Metrics" first.
-            _ = try? await OfflineTileStore.shared.discoverMapSourceURL()
+            _ = try? await SemayNodeDiscoveryService.shared.resolveBaseURL(forceDiscovery: true)
             endpointURL = makeHubMetricsEndpointURL(windowSeconds: windowSeconds)
         }
         guard let endpointURL else {
