@@ -1358,6 +1358,7 @@ private struct SemayExploreSheet: View {
     @ObservedObject var libraryStore: LibraryPackStore
     @Binding var selectedPinID: String?
     @Binding var selectedBusinessID: String?
+    @StateObject private var reachability = NetworkReachabilityService.shared
 
     @State private var query: String = ""
     @State private var segment: Segment = .places
@@ -1532,6 +1533,11 @@ private struct SemayExploreSheet: View {
             if libraryStore.packs.isEmpty {
                 Text("Library not installed.")
                     .foregroundStyle(.secondary)
+                if !reachability.isOnline {
+                    Text("Connect to a network to install the library.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button(installingLibraryPack ? "Installing..." : "Install Library") {
                     Task {
                         installingLibraryPack = true
@@ -1544,7 +1550,7 @@ private struct SemayExploreSheet: View {
                         }
                     }
                 }
-                .disabled(installingLibraryPack)
+                .disabled(installingLibraryPack || !reachability.isOnline)
 
                 if let libraryError, !libraryError.isEmpty {
                     Text(libraryError)
