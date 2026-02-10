@@ -365,6 +365,9 @@ private struct SemayMapTabView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        Text("Updated \(Date(timeIntervalSince1970: TimeInterval(selected.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         Text(selected.details)
                             .font(.subheadline)
                             .lineLimit(2)
@@ -413,6 +416,9 @@ private struct SemayMapTabView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        Text("Approvals: \(selected.approvalCount) • Updated \(Date(timeIntervalSince1970: TimeInterval(selected.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         Text(selected.details)
                             .font(.subheadline)
                             .lineLimit(2)
@@ -1571,6 +1577,7 @@ private struct AddPinSheet: View {
     @State private var latitude = "15.3229"
     @State private var longitude = "38.9251"
     @State private var error: String?
+    @State private var showCoordinateEditor = false
 
     private var parsedCoordinate: CLLocationCoordinate2D? {
         guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
@@ -1593,8 +1600,16 @@ private struct AddPinSheet: View {
                     .semayPhoneKeyboard()
 
                 Section("Location") {
-                    TextField("Latitude", text: $latitude)
-                    TextField("Longitude", text: $longitude)
+                    if let coord = parsedCoordinate {
+                        Text(String(format: "Lat %.6f, Lon %.6f", coord.latitude, coord.longitude))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Location not set")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Button("Use Current Location") {
                         if locationState.permissionState != .authorized {
                             locationState.enableLocationChannels()
@@ -1609,6 +1624,13 @@ private struct AddPinSheet: View {
                         latitude = String(format: "%.6f", loc.coordinate.latitude)
                         longitude = String(format: "%.6f", loc.coordinate.longitude)
                         error = nil
+                    }
+
+                    Toggle("Edit Coordinates", isOn: $showCoordinateEditor)
+
+                    if showCoordinateEditor {
+                        TextField("Latitude", text: $latitude)
+                        TextField("Longitude", text: $longitude)
                     }
                 }
 
@@ -1894,6 +1916,7 @@ private struct BusinessEditorSheet: View {
     @State private var latitude = "15.3229"
     @State private var longitude = "38.9251"
     @State private var error: String?
+    @State private var showCoordinateEditor = false
 
     private var parsedCoordinate: CLLocationCoordinate2D? {
         guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
@@ -1916,8 +1939,15 @@ private struct BusinessEditorSheet: View {
                     .semayPhoneKeyboard()
 
                 Section("Location") {
-                    TextField("Latitude", text: $latitude)
-                    TextField("Longitude", text: $longitude)
+                    if let coord = parsedCoordinate {
+                        Text(String(format: "Lat %.6f, Lon %.6f", coord.latitude, coord.longitude))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Location not set")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Button("Use Current Location") {
                         if locationState.permissionState != .authorized {
                             locationState.enableLocationChannels()
@@ -1932,6 +1962,13 @@ private struct BusinessEditorSheet: View {
                         latitude = String(format: "%.6f", loc.coordinate.latitude)
                         longitude = String(format: "%.6f", loc.coordinate.longitude)
                         error = nil
+                    }
+
+                    Toggle("Edit Coordinates", isOn: $showCoordinateEditor)
+
+                    if showCoordinateEditor {
+                        TextField("Latitude", text: $latitude)
+                        TextField("Longitude", text: $longitude)
                     }
                 }
 
