@@ -20,6 +20,7 @@ struct TextMessageView: View {
             // Precompute heavy token scans once per row
             let cashuLinks = message.content.extractCashuLinks()
             let lightningLinks = message.content.extractLightningLinks()
+            let semayLinks = message.content.extractSemayLinks()
             HStack(alignment: .top, spacing: 0) {
                 let isLong = (message.content.count > TransportConfig.uiLongMessageLengthThreshold || message.content.hasVeryLongToken(threshold: TransportConfig.uiVeryLongTokenThreshold)) && cashuLinks.isEmpty
                 let isExpanded = expandedMessageIDs.contains(message.id)
@@ -57,6 +58,17 @@ struct TextMessageView: View {
                     }
                     ForEach(cashuLinks, id: \.self) { link in
                         PaymentChipView(paymentType: .cashu(link))
+                    }
+                }
+                .padding(.top, 6)
+                .padding(.leading, 2)
+            }
+
+            // Render Semay deep links as in-app chips (business/place/promise)
+            if !semayLinks.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(semayLinks, id: \.self) { link in
+                        SemayLinkChipView(urlString: link)
                     }
                 }
                 .padding(.top, 6)

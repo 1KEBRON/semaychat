@@ -63,4 +63,27 @@ extension String {
         }
         return results
     }
+
+    // Extract up to `max` Semay deep links (semay://...). Returned as the raw URL string.
+    func extractSemayLinks(max: Int = 3) -> [String] {
+        var results: [String] = []
+        for raw in self.split(whereSeparator: { $0.isWhitespace || $0.isNewline }) {
+            var token = String(raw)
+
+            // Strip leading wrappers like "(" or "[".
+            while let first = token.first, "([{<".contains(first) {
+                token.removeFirst()
+            }
+            // Strip trailing punctuation like ")" or ",".
+            while let last = token.last, ".,);:!?]}>\'\"".contains(last) {
+                token.removeLast()
+            }
+
+            if token.lowercased().hasPrefix("semay://") {
+                results.append(token)
+                if results.count >= max { break }
+            }
+        }
+        return results
+    }
 }
