@@ -388,6 +388,16 @@ private struct SemayMapTabView: View {
                         Text(selected.details)
                             .font(.subheadline)
                             .lineLimit(2)
+                        if !selected.lightningLink.isEmpty || !selected.cashuLink.isEmpty {
+                            HStack(spacing: 10) {
+                                if !selected.lightningLink.isEmpty {
+                                    PaymentChipView(paymentType: .lightning(selected.lightningLink))
+                                }
+                                if !selected.cashuLink.isEmpty {
+                                    PaymentChipView(paymentType: .cashu(selected.cashuLink))
+                                }
+                            }
+                        }
                         HStack {
                             if let telURL = telURL(for: selected.phone) {
                                 Button("Call") {
@@ -1781,6 +1791,16 @@ private struct SemayBusinessTabView: View {
                                 }
                                 Text(business.details)
                                     .font(.subheadline)
+                                if !business.lightningLink.isEmpty || !business.cashuLink.isEmpty {
+                                    HStack(spacing: 10) {
+                                        if !business.lightningLink.isEmpty {
+                                            PaymentChipView(paymentType: .lightning(business.lightningLink))
+                                        }
+                                        if !business.cashuLink.isEmpty {
+                                            PaymentChipView(paymentType: .cashu(business.cashuLink))
+                                        }
+                                    }
+                                }
                                 HStack {
                                     if let url = telURL(for: business.phone) {
                                         Button("Call") {
@@ -1956,6 +1976,16 @@ private struct SemayBusinessQRSheet: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                    if !business.lightningLink.isEmpty {
+                        Text("Lightning: \(business.lightningLink)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !business.cashuLink.isEmpty {
+                        Text("Cashu: \(business.cashuLink)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(business.qrPayload)
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
@@ -1984,14 +2014,16 @@ private struct BusinessEditorSheet: View {
     let existingBusiness: BusinessProfile?
     @StateObject private var locationState = LocationStateManager.shared
 
-    @State private var name = ""
-    @State private var category = "shop"
-    @State private var details = ""
-    @State private var phone = ""
-    @State private var latitude = "15.3229"
-    @State private var longitude = "38.9251"
-    @State private var error: String?
-    @State private var showCoordinateEditor = false
+	    @State private var name = ""
+	    @State private var category = "shop"
+	    @State private var details = ""
+	    @State private var phone = ""
+	    @State private var lightningLink = ""
+	    @State private var cashuLink = ""
+	    @State private var latitude = "15.3229"
+	    @State private var longitude = "38.9251"
+	    @State private var error: String?
+	    @State private var showCoordinateEditor = false
 
     private var parsedCoordinate: CLLocationCoordinate2D? {
         guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
@@ -2006,14 +2038,23 @@ private struct BusinessEditorSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                TextField("Business Name", text: $name)
-                TextField("Category", text: $category)
-                TextField("Description", text: $details)
-                TextField("Phone (Optional)", text: $phone)
-                    .semayPhoneKeyboard()
+	            Form {
+	                TextField("Business Name", text: $name)
+	                TextField("Category", text: $category)
+	                TextField("Description", text: $details)
+	                TextField("Phone (Optional)", text: $phone)
+	                    .semayPhoneKeyboard()
 
-                Section("Location") {
+	                Section("Payments (Optional)") {
+	                    TextField("Lightning (e.g., lightning:...)", text: $lightningLink)
+	                        .semayDisableAutoCaps()
+	                        .semayDisableAutocorrection()
+	                    TextField("Cashu (optional)", text: $cashuLink)
+	                        .semayDisableAutoCaps()
+	                        .semayDisableAutocorrection()
+	                }
+	
+	                Section("Location") {
                     if let coord = parsedCoordinate {
                         Text(String(format: "Lat %.6f, Lon %.6f", coord.latitude, coord.longitude))
                             .font(.caption)
@@ -2075,46 +2116,52 @@ private struct BusinessEditorSheet: View {
                             return
                         }
 
-                        if let existingBusiness {
-                            let updated = dataStore.updateBusiness(
-                                businessID: existingBusiness.businessID,
-                                name: name,
-                                category: category,
-                                details: details,
-                                latitude: coord.latitude,
-                                longitude: coord.longitude,
-                                phone: phone
-                            )
-                            if updated == nil {
-                                error = "Only the business owner can update this profile right now."
-                                return
-                            }
+	                        if let existingBusiness {
+	                            let updated = dataStore.updateBusiness(
+	                                businessID: existingBusiness.businessID,
+	                                name: name,
+	                                category: category,
+	                                details: details,
+	                                latitude: coord.latitude,
+	                                longitude: coord.longitude,
+	                                phone: phone,
+	                                lightningLink: lightningLink,
+	                                cashuLink: cashuLink
+	                            )
+	                            if updated == nil {
+	                                error = "Only the business owner can update this profile right now."
+	                                return
+	                            }
                             dismiss()
                             return
                         }
 
-                        _ = dataStore.registerBusiness(
-                            name: name,
-                            category: category,
-                            details: details,
-                            latitude: coord.latitude,
-                            longitude: coord.longitude,
-                            phone: phone
-                        )
-                        dismiss()
-                    }
+	                        _ = dataStore.registerBusiness(
+	                            name: name,
+	                            category: category,
+	                            details: details,
+	                            latitude: coord.latitude,
+	                            longitude: coord.longitude,
+	                            phone: phone,
+	                            lightningLink: lightningLink,
+	                            cashuLink: cashuLink
+	                        )
+	                        dismiss()
+	                    }
                     .disabled(name.isEmpty || category.isEmpty || details.isEmpty || parsedCoordinate == nil)
                 }
             }
             .onAppear {
                 if let existingBusiness {
                     name = existingBusiness.name
-                    category = existingBusiness.category
-                    details = existingBusiness.details
-                    phone = existingBusiness.phone
-                    latitude = String(format: "%.6f", existingBusiness.latitude)
-                    longitude = String(format: "%.6f", existingBusiness.longitude)
-                } else if locationState.permissionState == .authorized,
+	                    category = existingBusiness.category
+	                    details = existingBusiness.details
+	                    phone = existingBusiness.phone
+	                    lightningLink = existingBusiness.lightningLink
+	                    cashuLink = existingBusiness.cashuLink
+	                    latitude = String(format: "%.6f", existingBusiness.latitude)
+	                    longitude = String(format: "%.6f", existingBusiness.longitude)
+	                } else if locationState.permissionState == .authorized,
                           let loc = locationState.lastKnownLocation {
                     latitude = String(format: "%.6f", loc.coordinate.latitude)
                     longitude = String(format: "%.6f", loc.coordinate.longitude)

@@ -354,7 +354,9 @@ final class SemayDataStore: ObservableObject {
         details: String,
         latitude: Double,
         longitude: Double,
-        phone: String = ""
+        phone: String = "",
+        lightningLink: String = "",
+        cashuLink: String = ""
     ) -> BusinessProfile {
         let businessID = UUID().uuidString.lowercased()
         let now = Int(Date().timeIntervalSince1970)
@@ -364,12 +366,15 @@ final class SemayDataStore: ObservableObject {
         let plusCode = address.plusCode
         let eAddress = address.eAddress
         let qrPayload = "semay://business/\(businessID)"
+        let normalizedLightning = normalizeLightningLink(lightningLink)
+        let normalizedCashu = cashuLink.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let sql = """
         INSERT INTO business_profiles (
             business_id, name, category, details, latitude, longitude, plus_code, e_address, phone,
+            lightning_link, cashu_link,
             owner_pubkey, qr_payload, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         _ = execute(
@@ -377,6 +382,7 @@ final class SemayDataStore: ObservableObject {
             binds: [
                 .text(businessID), .text(name), .text(category), .text(details),
                 .double(latitude), .double(longitude), .text(plusCode), .text(eAddress), .text(phone),
+                .text(normalizedLightning), .text(normalizedCashu),
                 .text(owner), .text(qrPayload), .int(now), .int(now)
             ]
         )
@@ -393,7 +399,9 @@ final class SemayDataStore: ObservableObject {
                 "longitude": String(longitude),
                 "plus_code": plusCode,
                 "e_address": eAddress,
-                "phone": phone
+                "phone": phone,
+                "lightning_link": normalizedLightning,
+                "cashu_link": normalizedCashu
             ]
         )
 
@@ -409,6 +417,8 @@ final class SemayDataStore: ObservableObject {
             plusCode: plusCode,
             eAddress: eAddress,
             phone: phone,
+            lightningLink: normalizedLightning,
+            cashuLink: normalizedCashu,
             ownerPubkey: owner,
             qrPayload: qrPayload,
             createdAt: now,
@@ -424,7 +434,9 @@ final class SemayDataStore: ObservableObject {
         details: String,
         latitude: Double,
         longitude: Double,
-        phone: String = ""
+        phone: String = "",
+        lightningLink: String = "",
+        cashuLink: String = ""
     ) -> BusinessProfile? {
         let rows = query(
             "SELECT owner_pubkey, created_at FROM business_profiles WHERE business_id = ? LIMIT 1",
@@ -447,12 +459,15 @@ final class SemayDataStore: ObservableObject {
         let plusCode = address.plusCode
         let eAddress = address.eAddress
         let qrPayload = "semay://business/\(businessID)"
+        let normalizedLightning = normalizeLightningLink(lightningLink)
+        let normalizedCashu = cashuLink.trimmingCharacters(in: .whitespacesAndNewlines)
 
         _ = execute(
             """
             UPDATE business_profiles
             SET name = ?, category = ?, details = ?, latitude = ?, longitude = ?,
                 plus_code = ?, e_address = ?, phone = ?,
+                lightning_link = ?, cashu_link = ?,
                 qr_payload = ?,
                 updated_at = ?
             WHERE business_id = ?
@@ -461,6 +476,7 @@ final class SemayDataStore: ObservableObject {
                 .text(name), .text(category), .text(details),
                 .double(latitude), .double(longitude),
                 .text(plusCode), .text(eAddress), .text(phone),
+                .text(normalizedLightning), .text(normalizedCashu),
                 .text(qrPayload),
                 .int(now), .text(businessID)
             ]
@@ -478,7 +494,9 @@ final class SemayDataStore: ObservableObject {
                 "longitude": String(longitude),
                 "plus_code": plusCode,
                 "e_address": eAddress,
-                "phone": phone
+                "phone": phone,
+                "lightning_link": normalizedLightning,
+                "cashu_link": normalizedCashu
             ]
         )
 
@@ -494,6 +512,8 @@ final class SemayDataStore: ObservableObject {
             plusCode: plusCode,
             eAddress: eAddress,
             phone: phone,
+            lightningLink: normalizedLightning,
+            cashuLink: normalizedCashu,
             ownerPubkey: ownerPubkey.lowercased(),
             qrPayload: qrPayload,
             createdAt: createdAt,
@@ -1248,6 +1268,7 @@ final class SemayDataStore: ObservableObject {
         let rows = query(
             """
             SELECT business_id, name, category, details, latitude, longitude, plus_code, e_address, phone,
+                   lightning_link, cashu_link,
                    owner_pubkey, qr_payload, created_at, updated_at
             FROM business_profiles
             ORDER BY updated_at DESC
@@ -1271,6 +1292,8 @@ final class SemayDataStore: ObservableObject {
 
             let latitude = (row["latitude"] as? Double) ?? Double(row["latitude"] as? Int ?? 0)
             let longitude = (row["longitude"] as? Double) ?? Double(row["longitude"] as? Int ?? 0)
+            let lightningLink = (row["lightning_link"] as? String) ?? ""
+            let cashuLink = (row["cashu_link"] as? String) ?? ""
 
             return BusinessProfile(
                 businessID: businessID,
@@ -1282,6 +1305,8 @@ final class SemayDataStore: ObservableObject {
                 plusCode: plusCode,
                 eAddress: eAddress,
                 phone: phone,
+                lightningLink: lightningLink,
+                cashuLink: cashuLink,
                 ownerPubkey: ownerPubkey,
                 qrPayload: qrPayload,
                 createdAt: createdAt,
@@ -1428,6 +1453,8 @@ final class SemayDataStore: ObservableObject {
                 plus_code TEXT NOT NULL DEFAULT '',
                 e_address TEXT NOT NULL,
                 phone TEXT NOT NULL DEFAULT '',
+                lightning_link TEXT NOT NULL DEFAULT '',
+                cashu_link TEXT NOT NULL DEFAULT '',
                 owner_pubkey TEXT NOT NULL,
                 qr_payload TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
@@ -1487,6 +1514,8 @@ final class SemayDataStore: ObservableObject {
         ensureColumn(table: "business_profiles", column: "longitude", definition: "REAL NOT NULL DEFAULT 0")
         ensureColumn(table: "business_profiles", column: "plus_code", definition: "TEXT NOT NULL DEFAULT ''")
         ensureColumn(table: "business_profiles", column: "phone", definition: "TEXT NOT NULL DEFAULT ''")
+        ensureColumn(table: "business_profiles", column: "lightning_link", definition: "TEXT NOT NULL DEFAULT ''")
+        ensureColumn(table: "business_profiles", column: "cashu_link", definition: "TEXT NOT NULL DEFAULT ''")
 
         backfillAddressesIfNeeded()
     }
@@ -1755,6 +1784,18 @@ final class SemayDataStore: ObservableObject {
         case .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage:
             return false
         }
+    }
+
+    private func normalizeLightningLink(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme,
+           !scheme.isEmpty {
+            return trimmed
+        }
+        // Accept bare invoices/lnurl/lightning-addresses by prefixing the common scheme.
+        return "lightning:\(trimmed)"
     }
 
     private func makeHubBatchEndpointURL() -> URL? {
@@ -2045,6 +2086,8 @@ final class SemayDataStore: ObservableObject {
         let plusCode = (payload["plus_code"] ?? "").isEmpty ? address.plusCode : (payload["plus_code"] ?? "")
         let eAddress = (payload["e_address"] ?? "").isEmpty ? address.eAddress : (payload["e_address"] ?? "")
         let phone = payload["phone"] ?? ""
+        let lightningLink = payload["lightning_link"] ?? ""
+        let cashuLink = payload["cashu_link"] ?? ""
         let owner = envelope.authorPubkey.lowercased()
         let qrPayload = "semay://business/\(businessID)"
         let ts = envelope.createdAt
@@ -2052,8 +2095,9 @@ final class SemayDataStore: ObservableObject {
         let sql = """
         INSERT INTO business_profiles (
             business_id, name, category, details, latitude, longitude, plus_code, e_address, phone,
+            lightning_link, cashu_link,
             owner_pubkey, qr_payload, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(business_id) DO UPDATE SET
             name = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.name ELSE business_profiles.name END,
             category = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.category ELSE business_profiles.category END,
@@ -2063,6 +2107,8 @@ final class SemayDataStore: ObservableObject {
             plus_code = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.plus_code ELSE business_profiles.plus_code END,
             e_address = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.e_address ELSE business_profiles.e_address END,
             phone = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.phone ELSE business_profiles.phone END,
+            lightning_link = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.lightning_link ELSE business_profiles.lightning_link END,
+            cashu_link = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.cashu_link ELSE business_profiles.cashu_link END,
             owner_pubkey = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.owner_pubkey ELSE business_profiles.owner_pubkey END,
             qr_payload = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.qr_payload ELSE business_profiles.qr_payload END,
             updated_at = CASE WHEN excluded.updated_at >= business_profiles.updated_at THEN excluded.updated_at ELSE business_profiles.updated_at END
@@ -2073,6 +2119,7 @@ final class SemayDataStore: ObservableObject {
             binds: [
                 .text(businessID), .text(name), .text(category), .text(details),
                 .double(lat), .double(lon), .text(plusCode), .text(eAddress), .text(phone),
+                .text(lightningLink), .text(cashuLink),
                 .text(owner), .text(qrPayload), .int(ts), .int(ts)
             ]
         )

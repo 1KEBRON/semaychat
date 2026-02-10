@@ -218,6 +218,8 @@ struct BusinessProfile: Codable, Identifiable, Equatable {
     var plusCode: String
     var eAddress: String
     var phone: String
+    var lightningLink: String
+    var cashuLink: String
     var ownerPubkey: String
     var qrPayload: String
     let createdAt: Int
@@ -235,6 +237,8 @@ struct BusinessProfile: Codable, Identifiable, Equatable {
         case plusCode = "plus_code"
         case eAddress = "e_address"
         case phone
+        case lightningLink = "lightning_link"
+        case cashuLink = "cashu_link"
         case ownerPubkey = "owner_pubkey"
         case qrPayload = "qr_payload"
         case createdAt = "created_at"
@@ -251,6 +255,8 @@ struct BusinessProfile: Codable, Identifiable, Equatable {
         plusCode: String = "",
         eAddress: String,
         phone: String = "",
+        lightningLink: String = "",
+        cashuLink: String = "",
         ownerPubkey: String,
         qrPayload: String,
         createdAt: Int,
@@ -265,6 +271,8 @@ struct BusinessProfile: Codable, Identifiable, Equatable {
         self.plusCode = plusCode
         self.eAddress = eAddress
         self.phone = phone
+        self.lightningLink = lightningLink
+        self.cashuLink = cashuLink
         self.ownerPubkey = ownerPubkey
         self.qrPayload = qrPayload
         self.createdAt = createdAt
@@ -282,6 +290,8 @@ struct BusinessProfile: Codable, Identifiable, Equatable {
         plusCode = try c.decodeIfPresent(String.self, forKey: .plusCode) ?? ""
         eAddress = try c.decode(String.self, forKey: .eAddress)
         phone = try c.decodeIfPresent(String.self, forKey: .phone) ?? ""
+        lightningLink = try c.decodeIfPresent(String.self, forKey: .lightningLink) ?? ""
+        cashuLink = try c.decodeIfPresent(String.self, forKey: .cashuLink) ?? ""
         ownerPubkey = try c.decode(String.self, forKey: .ownerPubkey)
         qrPayload = try c.decode(String.self, forKey: .qrPayload)
         createdAt = try c.decode(Int.self, forKey: .createdAt)
