@@ -183,6 +183,7 @@ private struct SemayMapTabView: View {
     @StateObject private var tileStore = OfflineTileStore.shared
     @StateObject private var libraryStore = LibraryPackStore.shared
     @StateObject private var reachability = NetworkReachabilityService.shared
+    @StateObject private var locationState = LocationStateManager.shared
     @ObservedObject private var navigation = SemayNavigationState.shared
     @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
 
@@ -191,10 +192,14 @@ private struct SemayMapTabView: View {
         span: MKCoordinateSpan(latitudeDelta: 2.6, longitudeDelta: 2.6)
     )
     @State private var showAddPin = false
+    @State private var editingPin: SemayMapPin?
+    @State private var pinEditorCoordinate: CLLocationCoordinate2D?
+    @State private var editingBusiness: BusinessProfile?
     @State private var useOSMBaseMap = false
     @State private var useOfflineTiles = false
     @State private var showTileImporter = false
     @State private var tileImportMessage: String?
+    @State private var mapActionMessage: String?
     @State private var lastAutoPackPath: String?
     @State private var showExplore = false
     @State private var installingCommunityPack = false
@@ -218,7 +223,12 @@ private struct SemayMapTabView: View {
                     ),
                     useOSMBaseMap: $useOSMBaseMap,
                     offlinePack: tileStore.availablePack,
-                    useOfflineTiles: $useOfflineTiles
+                    useOfflineTiles: $useOfflineTiles,
+                    onLongPress: { coordinate in
+                        editingPin = nil
+                        pinEditorCoordinate = coordinate
+                        showAddPin = true
+                    }
                 )
                 .ignoresSafeArea(edges: .bottom)
                 #else
@@ -370,6 +380,12 @@ private struct SemayMapTabView: View {
                             }
                             .buttonStyle(.bordered)
                             .disabled(selected.latitude == 0 && selected.longitude == 0)
+                            if dataStore.currentUserPubkey() == selected.ownerPubkey.lowercased() {
+                                Button("Update") {
+                                    editingBusiness = selected
+                                }
+                                .buttonStyle(.bordered)
+                            }
                             Spacer()
                             Button("Close") {
                                 navigation.selectedBusinessID = nil
@@ -402,7 +418,7 @@ private struct SemayMapTabView: View {
                             .lineLimit(2)
                         HStack {
                             Button("I'm Here / Approve") {
-                                _ = dataStore.approvePin(pinID: selected.pinID, distanceMeters: 120)
+                                approvePin(selected)
                             }
                             .buttonStyle(.borderedProminent)
                             if let telURL = telURL(for: selected.phone) {
@@ -413,6 +429,12 @@ private struct SemayMapTabView: View {
                             }
                             Button("Directions") {
                                 openDirections(latitude: selected.latitude, longitude: selected.longitude, name: selected.name)
+                            }
+                            .buttonStyle(.bordered)
+                            Button("Update") {
+                                editingPin = selected
+                                pinEditorCoordinate = nil
+                                showAddPin = true
                             }
                             .buttonStyle(.bordered)
                             Spacer()
@@ -466,6 +488,8 @@ private struct SemayMapTabView: View {
                 #endif
                 ToolbarItem(placement: .primaryAction) {
                     Button {
+                        editingPin = nil
+                        pinEditorCoordinate = region.center
                         showAddPin = true
                     } label: {
                         Image(systemName: "plus")
@@ -473,8 +497,12 @@ private struct SemayMapTabView: View {
                 }
             }
             .sheet(isPresented: $showAddPin) {
-                    AddPinSheet(isPresented: $showAddPin)
+                    AddPinSheet(isPresented: $showAddPin, existingPin: editingPin, initialCoordinate: pinEditorCoordinate)
                         .environmentObject(dataStore)
+            }
+            .sheet(item: $editingBusiness) { business in
+                BusinessEditorSheet(existingBusiness: business)
+                    .environmentObject(dataStore)
             }
             .sheet(isPresented: $showExplore) {
                 SemayExploreSheet(
@@ -500,6 +528,16 @@ private struct SemayMapTabView: View {
                     useOSMBaseMap = false
                 }
                 fitMapToPins()
+            }
+            .alert("Semay", isPresented: Binding(
+                get: { mapActionMessage != nil },
+                set: { if !$0 { mapActionMessage = nil } }
+            )) {
+                Button("OK") { mapActionMessage = nil }
+            } message: {
+                if let mapActionMessage {
+                    Text(mapActionMessage)
+                }
             }
             #if os(iOS)
             .fileImporter(
@@ -640,6 +678,31 @@ private struct SemayMapTabView: View {
         guard best.path != lastAutoPackPath else { return }
         lastAutoPackPath = best.path
         tileStore.selectPack(best)
+    }
+
+    private func approvePin(_ pin: SemayMapPin) {
+        if locationState.permissionState != .authorized {
+            locationState.enableLocationChannels()
+            mapActionMessage = "Enable location access to approve places nearby."
+            return
+        }
+
+        guard let loc = locationState.lastKnownLocation else {
+            locationState.refreshChannels()
+            mapActionMessage = "Getting your location… please try again in a moment."
+            return
+        }
+
+        let here = loc
+        let target = CLLocation(latitude: pin.latitude, longitude: pin.longitude)
+        let distance = here.distance(from: target)
+        if distance > 500 {
+            mapActionMessage = "Move closer to approve (within 500m). You are ~\(Int(distance))m away."
+            return
+        }
+
+        _ = dataStore.approvePin(pinID: pin.pinID, distanceMeters: distance)
+        mapActionMessage = "Approved. Distance ~\(Int(distance))m."
     }
 
     private func installCommunityPack() async {
@@ -905,6 +968,7 @@ private struct SemayMapView: UIViewRepresentable {
     @Binding var useOSMBaseMap: Bool
     let offlinePack: OfflineTilePack?
     @Binding var useOfflineTiles: Bool
+    let onLongPress: (CLLocationCoordinate2D) -> Void
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView(frame: .zero)
@@ -913,6 +977,9 @@ private struct SemayMapView: UIViewRepresentable {
         mapView.showsCompass = true
         mapView.showsScale = true
         mapView.setRegion(region, animated: false)
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.5
+        mapView.addGestureRecognizer(longPress)
         context.coordinator.applyBaseLayer(
             to: mapView,
             useOSM: useOSMBaseMap,
@@ -951,6 +1018,14 @@ private struct SemayMapView: UIViewRepresentable {
             self.parent = parent
             super.init()
             osmOverlay.canReplaceMapContent = true
+        }
+
+        @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began else { return }
+            guard let mapView = gesture.view as? MKMapView else { return }
+            let point = gesture.location(in: mapView)
+            let coordinate = mapView.convert(point, toCoordinateFrom: mapView)
+            parent.onLongPress(coordinate)
         }
 
         func applyBaseLayer(
@@ -1485,6 +1560,9 @@ private struct SemayLibraryReaderSheet: View {
 private struct AddPinSheet: View {
     @EnvironmentObject private var dataStore: SemayDataStore
     @Binding var isPresented: Bool
+    let existingPin: SemayMapPin?
+    let initialCoordinate: CLLocationCoordinate2D?
+    @StateObject private var locationState = LocationStateManager.shared
 
     @State private var name = ""
     @State private var type = "shop"
@@ -1492,6 +1570,18 @@ private struct AddPinSheet: View {
     @State private var phone = ""
     @State private var latitude = "15.3229"
     @State private var longitude = "38.9251"
+    @State private var error: String?
+
+    private var parsedCoordinate: CLLocationCoordinate2D? {
+        guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+
+    private var computedAddress: (plus: String, e: String) {
+        guard let coord = parsedCoordinate else { return ("", "") }
+        let a = SemayAddress.eAddress(latitude: coord.latitude, longitude: coord.longitude)
+        return (a.plusCode, a.eAddress)
+    }
 
     var body: some View {
         NavigationStack {
@@ -1501,28 +1591,96 @@ private struct AddPinSheet: View {
                 TextField("Description", text: $details)
                 TextField("Phone (Optional)", text: $phone)
                     .semayPhoneKeyboard()
-                TextField("Latitude", text: $latitude)
-                TextField("Longitude", text: $longitude)
+
+                Section("Location") {
+                    TextField("Latitude", text: $latitude)
+                    TextField("Longitude", text: $longitude)
+                    Button("Use Current Location") {
+                        if locationState.permissionState != .authorized {
+                            locationState.enableLocationChannels()
+                            error = "Enable location access to use your current position."
+                            return
+                        }
+                        guard let loc = locationState.lastKnownLocation else {
+                            locationState.refreshChannels()
+                            error = "Getting your location… please try again in a moment."
+                            return
+                        }
+                        latitude = String(format: "%.6f", loc.coordinate.latitude)
+                        longitude = String(format: "%.6f", loc.coordinate.longitude)
+                        error = nil
+                    }
+                }
+
+                if !computedAddress.plus.isEmpty {
+                    Section("Address") {
+                        Text("Plus Code: \(computedAddress.plus)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("E-Address: \(computedAddress.e)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                }
             }
-            .navigationTitle("Add Pin")
+            .navigationTitle(existingPin == nil ? "Add Place" : "Update Place")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { isPresented = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let lat = Double(latitude), let lon = Double(longitude) else { return }
+                        guard let coord = parsedCoordinate else {
+                            error = "Invalid latitude/longitude."
+                            return
+                        }
+                        if let existingPin {
+                            let updated = dataStore.updatePin(
+                                pinID: existingPin.pinID,
+                                name: name,
+                                type: type,
+                                details: details,
+                                latitude: coord.latitude,
+                                longitude: coord.longitude,
+                                phone: phone
+                            )
+                            if updated == nil {
+                                error = "Unable to update this place."
+                                return
+                            }
+                            isPresented = false
+                            return
+                        }
+
                         _ = dataStore.addPin(
                             name: name,
                             type: type,
                             details: details,
-                            latitude: lat,
-                            longitude: lon,
+                            latitude: coord.latitude,
+                            longitude: coord.longitude,
                             phone: phone
                         )
                         isPresented = false
                     }
-                    .disabled(name.isEmpty || type.isEmpty || details.isEmpty)
+                    .disabled(name.isEmpty || type.isEmpty || details.isEmpty || parsedCoordinate == nil)
+                }
+            }
+            .onAppear {
+                if let existingPin {
+                    name = existingPin.name
+                    type = existingPin.type
+                    details = existingPin.details
+                    phone = existingPin.phone
+                    latitude = String(format: "%.6f", existingPin.latitude)
+                    longitude = String(format: "%.6f", existingPin.longitude)
+                } else if let initialCoordinate {
+                    latitude = String(format: "%.6f", initialCoordinate.latitude)
+                    longitude = String(format: "%.6f", initialCoordinate.longitude)
                 }
             }
         }
@@ -1535,6 +1693,7 @@ private struct SemayBusinessTabView: View {
 
     @State private var showRegisterBusiness = false
     @State private var qrBusiness: BusinessProfile?
+    @State private var editingBusiness: BusinessProfile?
 
     var body: some View {
         NavigationStack {
@@ -1585,17 +1744,12 @@ private struct SemayBusinessTabView: View {
                                     }
                                     .buttonStyle(.bordered)
 
-                                    Button("Create Promise") {
-                                        _ = dataStore.createPromise(merchantID: business.businessID, amountMsat: 100_000)
-                                    }
-                                    .buttonStyle(.bordered)
-
-                                    Button("Pay via Lightning") {
-                                        if let url = URL(string: "lightning:lnbc10u1p3example") {
-                                            openURL(url)
+                                    if business.ownerPubkey.lowercased() == dataStore.currentUserPubkey() {
+                                        Button("Edit") {
+                                            editingBusiness = business
                                         }
+                                        .buttonStyle(.bordered)
                                     }
-                                    .buttonStyle(.borderedProminent)
                                 }
                             }
                         }
@@ -1654,11 +1808,15 @@ private struct SemayBusinessTabView: View {
                 }
             }
             .sheet(isPresented: $showRegisterBusiness) {
-                RegisterBusinessSheet(isPresented: $showRegisterBusiness)
+                BusinessEditorSheet(existingBusiness: nil)
                     .environmentObject(dataStore)
             }
             .sheet(item: $qrBusiness) { business in
                 SemayBusinessQRSheet(business: business)
+            }
+            .sheet(item: $editingBusiness) { business in
+                BusinessEditorSheet(existingBusiness: business)
+                    .environmentObject(dataStore)
             }
         }
     }
@@ -1723,9 +1881,11 @@ private struct SemayBusinessQRSheet: View {
     }
 }
 
-private struct RegisterBusinessSheet: View {
+private struct BusinessEditorSheet: View {
     @EnvironmentObject private var dataStore: SemayDataStore
-    @Binding var isPresented: Bool
+    @Environment(\.dismiss) private var dismiss
+    let existingBusiness: BusinessProfile?
+    @StateObject private var locationState = LocationStateManager.shared
 
     @State private var name = ""
     @State private var category = "shop"
@@ -1733,6 +1893,18 @@ private struct RegisterBusinessSheet: View {
     @State private var phone = ""
     @State private var latitude = "15.3229"
     @State private var longitude = "38.9251"
+    @State private var error: String?
+
+    private var parsedCoordinate: CLLocationCoordinate2D? {
+        guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+
+    private var computedAddress: (plus: String, e: String) {
+        guard let coord = parsedCoordinate else { return ("", "") }
+        let a = SemayAddress.eAddress(latitude: coord.latitude, longitude: coord.longitude)
+        return (a.plusCode, a.eAddress)
+    }
 
     var body: some View {
         NavigationStack {
@@ -1742,28 +1914,94 @@ private struct RegisterBusinessSheet: View {
                 TextField("Description", text: $details)
                 TextField("Phone (Optional)", text: $phone)
                     .semayPhoneKeyboard()
-                TextField("Latitude", text: $latitude)
-                TextField("Longitude", text: $longitude)
+
+                Section("Location") {
+                    TextField("Latitude", text: $latitude)
+                    TextField("Longitude", text: $longitude)
+                    Button("Use Current Location") {
+                        if locationState.permissionState != .authorized {
+                            locationState.enableLocationChannels()
+                            error = "Enable location access to use your current position."
+                            return
+                        }
+                        guard let loc = locationState.lastKnownLocation else {
+                            locationState.refreshChannels()
+                            error = "Getting your location… please try again in a moment."
+                            return
+                        }
+                        latitude = String(format: "%.6f", loc.coordinate.latitude)
+                        longitude = String(format: "%.6f", loc.coordinate.longitude)
+                        error = nil
+                    }
+                }
+
+                if !computedAddress.plus.isEmpty {
+                    Section("Address") {
+                        Text("Plus Code: \(computedAddress.plus)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("E-Address: \(computedAddress.e)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                }
             }
-            .navigationTitle("Register Business")
+            .navigationTitle(existingBusiness == nil ? "Register Business" : "Update Business")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { isPresented = false }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let lat = Double(latitude), let lon = Double(longitude) else { return }
+                        guard let coord = parsedCoordinate else {
+                            error = "Invalid latitude/longitude."
+                            return
+                        }
+
+                        if let existingBusiness {
+                            let updated = dataStore.updateBusiness(
+                                businessID: existingBusiness.businessID,
+                                name: name,
+                                category: category,
+                                details: details,
+                                latitude: coord.latitude,
+                                longitude: coord.longitude,
+                                phone: phone
+                            )
+                            if updated == nil {
+                                error = "Only the business owner can update this profile right now."
+                                return
+                            }
+                            dismiss()
+                            return
+                        }
+
                         _ = dataStore.registerBusiness(
                             name: name,
                             category: category,
                             details: details,
-                            latitude: lat,
-                            longitude: lon,
+                            latitude: coord.latitude,
+                            longitude: coord.longitude,
                             phone: phone
                         )
-                        isPresented = false
+                        dismiss()
                     }
-                    .disabled(name.isEmpty || category.isEmpty || details.isEmpty)
+                    .disabled(name.isEmpty || category.isEmpty || details.isEmpty || parsedCoordinate == nil)
+                }
+            }
+            .onAppear {
+                if let existingBusiness {
+                    name = existingBusiness.name
+                    category = existingBusiness.category
+                    details = existingBusiness.details
+                    phone = existingBusiness.phone
+                    latitude = String(format: "%.6f", existingBusiness.latitude)
+                    longitude = String(format: "%.6f", existingBusiness.longitude)
                 }
             }
         }

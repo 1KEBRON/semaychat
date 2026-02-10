@@ -130,6 +130,10 @@ final class SemayDataStore: ObservableObject {
         pins.filter { $0.isVisible }
     }
 
+    func currentUserPubkey() -> String {
+        currentAuthorPubkey()
+    }
+
     @discardableResult
     func addPin(
         name: String,
@@ -191,6 +195,114 @@ final class SemayDataStore: ObservableObject {
             approvalCount: 0,
             isVisible: false,
             createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    @discardableResult
+    func updatePin(
+        pinID: String,
+        name: String,
+        type: String,
+        details: String,
+        latitude: Double,
+        longitude: Double,
+        phone: String = ""
+    ) -> SemayMapPin? {
+        let rows = query(
+            "SELECT latitude, longitude, approval_count, is_visible, created_at FROM pins WHERE pin_id = ? LIMIT 1",
+            binds: [.text(pinID)]
+        )
+        guard let row = rows.first,
+              let oldLat = row["latitude"] as? Double,
+              let oldLon = row["longitude"] as? Double
+        else {
+            return nil
+        }
+
+        let oldApproval = (row["approval_count"] as? Int) ?? 0
+        let oldVisible = (row["is_visible"] as? Int) ?? 0
+        let createdAt = (row["created_at"] as? Int) ?? Int(Date().timeIntervalSince1970)
+
+        let now = Int(Date().timeIntervalSince1970)
+        let address = SemayAddress.eAddress(latitude: latitude, longitude: longitude)
+        let plusCode = address.plusCode
+        let eAddress = address.eAddress
+        let actor = currentAuthorPubkey()
+
+        let moved = abs(oldLat - latitude) > 0.0005 || abs(oldLon - longitude) > 0.0005
+        if moved {
+            _ = execute("DELETE FROM pin_approvals WHERE pin_id = ?", binds: [.text(pinID)])
+        }
+
+        if moved {
+            _ = execute(
+                """
+                UPDATE pins
+                SET name = ?, type = ?, details = ?, latitude = ?, longitude = ?,
+                    plus_code = ?, e_address = ?, phone = ?,
+                    author_pubkey = ?,
+                    approval_count = 0, is_visible = 0,
+                    updated_at = ?
+                WHERE pin_id = ?
+                """,
+                binds: [
+                    .text(name), .text(type), .text(details),
+                    .double(latitude), .double(longitude),
+                    .text(plusCode), .text(eAddress), .text(phone),
+                    .text(actor),
+                    .int(now), .text(pinID)
+                ]
+            )
+        } else {
+            _ = execute(
+                """
+                UPDATE pins
+                SET name = ?, type = ?, details = ?, latitude = ?, longitude = ?,
+                    plus_code = ?, e_address = ?, phone = ?,
+                    author_pubkey = ?,
+                    updated_at = ?
+                WHERE pin_id = ?
+                """,
+                binds: [
+                    .text(name), .text(type), .text(details),
+                    .double(latitude), .double(longitude),
+                    .text(plusCode), .text(eAddress), .text(phone),
+                    .text(actor),
+                    .int(now), .text(pinID)
+                ]
+            )
+        }
+
+        let payload = [
+            "pin_id": pinID,
+            "name": name,
+            "type": type,
+            "details": details,
+            "latitude": String(latitude),
+            "longitude": String(longitude),
+            "plus_code": plusCode,
+            "e_address": eAddress,
+            "phone": phone
+        ]
+        enqueueEvent(.pinUpdate, entityID: "pin:\(pinID)", payload: payload)
+
+        refreshPins()
+
+        return SemayMapPin(
+            pinID: pinID,
+            name: name,
+            type: type,
+            details: details,
+            latitude: latitude,
+            longitude: longitude,
+            plusCode: plusCode,
+            eAddress: eAddress,
+            phone: phone,
+            authorPubkey: actor,
+            approvalCount: moved ? 0 : oldApproval,
+            isVisible: moved ? false : (oldVisible != 0),
+            createdAt: createdAt,
             updatedAt: now
         )
     }
@@ -300,6 +412,91 @@ final class SemayDataStore: ObservableObject {
             ownerPubkey: owner,
             qrPayload: qrPayload,
             createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    @discardableResult
+    func updateBusiness(
+        businessID: String,
+        name: String,
+        category: String,
+        details: String,
+        latitude: Double,
+        longitude: Double,
+        phone: String = ""
+    ) -> BusinessProfile? {
+        let rows = query(
+            "SELECT owner_pubkey, created_at FROM business_profiles WHERE business_id = ? LIMIT 1",
+            binds: [.text(businessID)]
+        )
+        guard let row = rows.first,
+              let ownerPubkey = row["owner_pubkey"] as? String else {
+            return nil
+        }
+
+        let actor = currentAuthorPubkey()
+        guard actor.lowercased() == ownerPubkey.lowercased() else {
+            // Owner-only edits for MVP.
+            return nil
+        }
+
+        let createdAt = (row["created_at"] as? Int) ?? Int(Date().timeIntervalSince1970)
+        let now = Int(Date().timeIntervalSince1970)
+        let address = SemayAddress.eAddress(latitude: latitude, longitude: longitude)
+        let plusCode = address.plusCode
+        let eAddress = address.eAddress
+        let qrPayload = "semay://business/\(businessID)"
+
+        _ = execute(
+            """
+            UPDATE business_profiles
+            SET name = ?, category = ?, details = ?, latitude = ?, longitude = ?,
+                plus_code = ?, e_address = ?, phone = ?,
+                qr_payload = ?,
+                updated_at = ?
+            WHERE business_id = ?
+            """,
+            binds: [
+                .text(name), .text(category), .text(details),
+                .double(latitude), .double(longitude),
+                .text(plusCode), .text(eAddress), .text(phone),
+                .text(qrPayload),
+                .int(now), .text(businessID)
+            ]
+        )
+
+        enqueueEvent(
+            .businessRegister,
+            entityID: "business:\(businessID)",
+            payload: [
+                "business_id": businessID,
+                "name": name,
+                "category": category,
+                "details": details,
+                "latitude": String(latitude),
+                "longitude": String(longitude),
+                "plus_code": plusCode,
+                "e_address": eAddress,
+                "phone": phone
+            ]
+        )
+
+        refreshBusinesses()
+
+        return BusinessProfile(
+            businessID: businessID,
+            name: name,
+            category: category,
+            details: details,
+            latitude: latitude,
+            longitude: longitude,
+            plusCode: plusCode,
+            eAddress: eAddress,
+            phone: phone,
+            ownerPubkey: ownerPubkey.lowercased(),
+            qrPayload: qrPayload,
+            createdAt: createdAt,
             updatedAt: now
         )
     }

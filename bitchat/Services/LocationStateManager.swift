@@ -42,6 +42,8 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     // MARK: - Published State (Channel)
 
     @Published private(set) var permissionState: PermissionState = .notDetermined
+    @Published private(set) var lastKnownLocation: CLLocation?
+    @Published private(set) var lastKnownLocationAt: Date?
     @Published private(set) var availableChannels: [GeohashChannel] = []
     @Published private(set) var selectedChannel: ChannelID = .mesh
     @Published var teleported: Bool = false
@@ -301,6 +303,10 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
         lastLocation = loc
+        Task { @MainActor in
+            self.lastKnownLocation = loc
+            self.lastKnownLocationAt = Date()
+        }
         computeChannels(from: loc.coordinate)
         reverseGeocodeLocation(loc)
     }
