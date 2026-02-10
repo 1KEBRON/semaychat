@@ -409,6 +409,10 @@ private struct SemayMapTabView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                             }
+                            ShareLink(item: businessShareText(selected)) {
+                                Text("Share")
+                            }
+                            .buttonStyle(.bordered)
                             Button("Promise Pay") {
                                 promisePayBusiness = selected
                             }
@@ -462,6 +466,10 @@ private struct SemayMapTabView: View {
                                 approvePin(selected)
                             }
                             .buttonStyle(.borderedProminent)
+                            ShareLink(item: placeShareText(selected)) {
+                                Text("Share")
+                            }
+                            .buttonStyle(.bordered)
                             if let telURL = telURL(for: selected.phone) {
                                 Button("Call") {
                                     openURL(telURL)
@@ -711,6 +719,34 @@ private struct SemayMapTabView: View {
         let q = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "http://maps.apple.com/?ll=\(latitude),\(longitude)&q=\(q)") else { return }
         openURL(url)
+    }
+
+    private func businessShareText(_ business: BusinessProfile) -> String {
+        var lines: [String] = []
+        lines.append(business.name)
+        lines.append("\(business.category) • \(business.eAddress)")
+        if !business.plusCode.isEmpty {
+            lines.append(business.plusCode)
+        }
+        if !business.phone.isEmpty {
+            lines.append("Call: \(business.phone)")
+        }
+        lines.append("semay://business/\(business.businessID)")
+        return lines.joined(separator: "\n")
+    }
+
+    private func placeShareText(_ pin: SemayMapPin) -> String {
+        var lines: [String] = []
+        lines.append(pin.name)
+        lines.append("\(pin.type) • \(pin.eAddress)")
+        if !pin.plusCode.isEmpty {
+            lines.append(pin.plusCode)
+        }
+        if !pin.phone.isEmpty {
+            lines.append("Call: \(pin.phone)")
+        }
+        lines.append("semay://place/\(pin.pinID)")
+        return lines.joined(separator: "\n")
     }
 
     private func fitMapToPins() {
