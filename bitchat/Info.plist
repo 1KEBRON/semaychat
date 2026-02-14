@@ -30,6 +30,16 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>SemayPrivacyPolicyURL</key>
+	<string>https://github.com/1KEBRON/semaychat/blob/main/docs/privacy-policy.md</string>
+	<key>SemayTermsOfUseURL</key>
+	<string>https://github.com/1KEBRON/semaychat/blob/main/docs/terms-of-use.md</string>
+	<key>SemayModerationPolicyURL</key>
+	<string>https://github.com/1KEBRON/semaychat/blob/main/docs/community-moderation.md</string>
+	<key>SemaySupportEmail</key>
+	<string>support@semay.app</string>
+	<key>SemaySupportURL</key>
+	<string>https://github.com/1KEBRON/semaychat/issues</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>

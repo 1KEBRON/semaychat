@@ -2560,6 +2560,7 @@ private struct BusinessEditorSheet: View {
 		private struct SemayMeTabView: View {
 		    @EnvironmentObject private var dataStore: SemayDataStore
 		    @EnvironmentObject private var seedService: SeedPhraseService
+            @Environment(\.openURL) private var openURL
 		    @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
             @AppStorage("semay.icloud_backup_enabled") private var iCloudBackupEnabled = false
 		    @StateObject private var safety = SafetyModeService.shared
@@ -2580,11 +2581,12 @@ private struct BusinessEditorSheet: View {
 	    @State private var installingOfflineMaps = false
 	    @State private var offlineMapsNotice = ""
 	    @State private var offlineMapsError = ""
-            @State private var aboutTapCount = 0
-            @State private var aboutNotice = ""
-            @State private var cloudBackupBusy = false
-            @State private var cloudBackupNotice = ""
-            @State private var cloudBackupError = ""
+	            @State private var aboutTapCount = 0
+	            @State private var aboutNotice = ""
+	            @State private var cloudBackupBusy = false
+	            @State private var cloudBackupNotice = ""
+	            @State private var cloudBackupError = ""
+                @State private var legalSupportNotice = ""
 	
 	    var body: some View {
 	        NavigationStack {
@@ -2606,10 +2608,10 @@ private struct BusinessEditorSheet: View {
                     ))
                 }
 
-                Section("About") {
-                    Button {
-                        handleAboutTap()
-                    } label: {
+	                Section("About") {
+	                    Button {
+	                        handleAboutTap()
+	                    } label: {
                         HStack {
                             Text("Version")
                             Spacer()
@@ -2785,6 +2787,30 @@ private struct BusinessEditorSheet: View {
 	                        }
 	                    }
 	                }
+
+                    Section("Legal & Support") {
+                        Button("Privacy Policy") {
+                            openConfiguredURL(infoKey: "SemayPrivacyPolicyURL", label: "Privacy Policy")
+                        }
+                        Button("Terms of Use") {
+                            openConfiguredURL(infoKey: "SemayTermsOfUseURL", label: "Terms of Use")
+                        }
+                        Button("Community Moderation Policy") {
+                            openConfiguredURL(infoKey: "SemayModerationPolicyURL", label: "Community Moderation Policy")
+                        }
+                        Button("Contact Support") {
+                            openSupport()
+                        }
+                        Button("Report an Issue") {
+                            openConfiguredURL(infoKey: "SemaySupportURL", label: "Issue tracker")
+                        }
+
+                        if !legalSupportNotice.isEmpty {
+                            Text(legalSupportNotice)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
 	                if advancedSettingsEnabled {
 	                    Section("Node (Advanced)") {
@@ -2981,16 +3007,53 @@ private struct BusinessEditorSheet: View {
                 return "\(version) (\(build))"
             }
 
-            private func handleAboutTap() {
-                guard !advancedSettingsEnabled else { return }
-                aboutTapCount += 1
-                if aboutTapCount >= 7 {
-                    advancedSettingsEnabled = true
-                    aboutNotice = "Advanced settings enabled."
-                    aboutTapCount = 0
+	            private func handleAboutTap() {
+	                guard !advancedSettingsEnabled else { return }
+	                aboutTapCount += 1
+	                if aboutTapCount >= 7 {
+	                    advancedSettingsEnabled = true
+	                    aboutNotice = "Advanced settings enabled."
+	                    aboutTapCount = 0
+	                }
+	            }
+
+                private func openSupport() {
+                    if let email = bundleString(for: "SemaySupportEmail"),
+                       !email.isEmpty,
+                       var components = URLComponents(string: "mailto:\(email)") {
+                        components.queryItems = [
+                            URLQueryItem(name: "subject", value: "Semay Support")
+                        ]
+                        if let mailtoURL = components.url {
+                            openURL(mailtoURL)
+                            legalSupportNotice = ""
+                            return
+                        }
+                    }
+
+                    openConfiguredURL(infoKey: "SemaySupportURL", label: "Support URL")
                 }
-            }
-		}
+
+                private func openConfiguredURL(infoKey: String, label: String) {
+                    guard let urlString = bundleString(for: infoKey),
+                          let url = URL(string: urlString),
+                          let scheme = url.scheme,
+                          !scheme.isEmpty else {
+                        legalSupportNotice = "\(label) is not configured."
+                        return
+                    }
+                    openURL(url)
+                    legalSupportNotice = ""
+                }
+
+                private func bundleString(for key: String) -> String? {
+                    guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+                        return nil
+                    }
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : trimmed
+                }
+			}
 
 private struct SemayRestoreSeedSheet: View {
     @Binding var isPresented: Bool
