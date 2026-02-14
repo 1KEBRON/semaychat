@@ -8,11 +8,15 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         case pinUpdate = "pin.update"
         case pinApproval = "pin.approval"
         case businessRegister = "business.register"
+        case businessUpdate = "business.update"
+        case bulletinPost = "bulletin.post"
+        case routeCurated = "route.curated"
         case promiseCreate = "promise.create"
         case promiseAccept = "promise.accept"
         case promiseReject = "promise.reject"
         case promiseSettle = "promise.settle"
         case chatMessage = "chat.message"
+        case chatAck = "chat.ack"
     }
 
     enum ValidationCategory: String, Codable {

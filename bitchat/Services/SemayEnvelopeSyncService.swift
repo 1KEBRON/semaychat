@@ -39,26 +39,64 @@ final class SemayEnvelopeSyncService: ObservableObject {
         isSyncing = true
         defer { isSyncing = false }
 
-        let pushReport = await SemayDataStore.shared.syncOutboxToHub()
-        var feedReport: SemayDataStore.FeedSyncReport?
-        let now = Date()
-        if lastFeedSyncAt == nil || now.timeIntervalSince(lastFeedSyncAt ?? .distantPast) >= feedIntervalSeconds {
-            feedReport = await SemayDataStore.shared.syncFeedFromHub()
-            lastFeedSyncAt = now
-        }
-        lastSyncAt = Date()
-        if let feedReport {
-            lastSummary = "push: \(pushReport.summary) | pull: \(feedReport.summary)"
-        } else {
-            lastSummary = "push: \(pushReport.summary)"
+        let dataStore = SemayDataStore.shared
+
+        let nostrPushReport = await dataStore.syncOutboxToNostr()
+        var nodePushReport: SemayDataStore.OutboxSyncReport?
+        if dataStore.hasConfiguredNode() {
+            nodePushReport = await dataStore.syncOutboxToHub(allowDiscovery: false)
         }
 
-        let errors = [pushReport.errorMessage, feedReport?.errorMessage].compactMap { $0 }.filter { !$0.isEmpty }
+        var nostrFeedReport: SemayDataStore.FeedSyncReport?
+        var nodeFeedReport: SemayDataStore.FeedSyncReport?
+        let now = Date()
+        if lastFeedSyncAt == nil || now.timeIntervalSince(lastFeedSyncAt ?? .distantPast) >= feedIntervalSeconds {
+            nostrFeedReport = await dataStore.syncFeedFromNostr()
+            if dataStore.hasConfiguredNode() {
+                nodeFeedReport = await dataStore.syncFeedFromHub(allowDiscovery: false)
+            }
+            lastFeedSyncAt = now
+        }
+
+        lastSyncAt = Date()
+
+        let pushSummary: String = {
+            if let nodePushReport {
+                return "nostr \(nostrPushReport.summary) | node \(nodePushReport.summary)"
+            }
+            return "nostr \(nostrPushReport.summary)"
+        }()
+
+        if nostrFeedReport != nil || nodeFeedReport != nil {
+            var pullParts: [String] = []
+            if let nostrFeedReport {
+                pullParts.append("nostr \(nostrFeedReport.summary)")
+            }
+            if let nodeFeedReport {
+                pullParts.append("node \(nodeFeedReport.summary)")
+            }
+            lastSummary = "push: \(pushSummary) | pull: \(pullParts.joined(separator: " | "))"
+        } else {
+            lastSummary = "push: \(pushSummary)"
+        }
+
+        let errors = [
+            nostrPushReport.errorMessage,
+            nodePushReport?.errorMessage,
+            nostrFeedReport?.errorMessage,
+            nodeFeedReport?.errorMessage,
+        ]
+        .compactMap { $0 }
+        .filter { !$0.isEmpty }
+
         lastError = errors.isEmpty ? nil : errors.joined(separator: " | ")
 
         if let error = lastError {
             SecureLogger.warning("Semay envelope sync warning: \(error)", category: .session)
-        } else if pushReport.attempted > 0 || (feedReport?.applied ?? 0) > 0 {
+        } else if nostrPushReport.attempted > 0
+            || (nodePushReport?.attempted ?? 0) > 0
+            || (nostrFeedReport?.applied ?? 0) > 0
+            || (nodeFeedReport?.applied ?? 0) > 0 {
             SecureLogger.info("Semay envelope sync: \(lastSummary ?? "")", category: .session)
         }
     }

@@ -101,13 +101,17 @@ final class SemayDataStore: ObservableObject {
 
     @Published private(set) var pins: [SemayMapPin] = []
     @Published private(set) var businesses: [BusinessProfile] = []
+    @Published private(set) var bulletins: [BulletinPost] = []
     @Published private(set) var promises: [PromiseNote] = []
+    @Published private(set) var mutedBulletinAuthors: Set<String> = []
 
     private let queue = DispatchQueue(label: "semay.data.store")
     private let idBridge = NostrIdentityBridge()
     private let lamportKey = "semay.lamport.clock"
     private let hubBaseURLKey = "semay.hub.base_url"
     private let hubIngestTokenKey = "semay.hub.ingest_token"
+    private let semayNostrContentPrefix = "semay1:"
+    private let semayNostrTag = "semay-v1"
     private let maxOutboxAttempts = 10
 
     private var db: OpaquePointer?
@@ -483,7 +487,7 @@ final class SemayDataStore: ObservableObject {
         )
 
         enqueueEvent(
-            .businessRegister,
+            .businessUpdate,
             entityID: "business:\(businessID)",
             payload: [
                 "business_id": businessID,
@@ -519,6 +523,114 @@ final class SemayDataStore: ObservableObject {
             createdAt: createdAt,
             updatedAt: now
         )
+    }
+
+    // MARK: - Bulletins
+
+    func visibleBulletins() -> [BulletinPost] {
+        bulletins.filter { !mutedBulletinAuthors.contains($0.authorPubkey.lowercased()) }
+    }
+
+    @discardableResult
+    func postBulletin(
+        title: String,
+        category: BulletinCategory,
+        body: String,
+        phone: String = "",
+        latitude: Double,
+        longitude: Double
+    ) -> BulletinPost {
+        let bulletinID = UUID().uuidString.lowercased()
+        let now = Int(Date().timeIntervalSince1970)
+        let author = currentAuthorPubkey()
+        let address = SemayAddress.eAddress(latitude: latitude, longitude: longitude)
+        let plusCode = address.plusCode
+        let eAddress = address.eAddress
+
+        let sql = """
+        INSERT INTO bulletins (
+            bulletin_id, title, category, body, phone, latitude, longitude,
+            plus_code, e_address, author_pubkey, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        _ = execute(
+            sql,
+            binds: [
+                .text(bulletinID), .text(title), .text(category.rawValue), .text(body), .text(phone),
+                .double(latitude), .double(longitude),
+                .text(plusCode), .text(eAddress), .text(author),
+                .int(now), .int(now)
+            ]
+        )
+
+        enqueueEvent(
+            .bulletinPost,
+            entityID: "bulletin:\(bulletinID)",
+            payload: [
+                "bulletin_id": bulletinID,
+                "title": title,
+                "category": category.rawValue,
+                "body": body,
+                "phone": phone,
+                "latitude": String(latitude),
+                "longitude": String(longitude),
+                "plus_code": plusCode,
+                "e_address": eAddress
+            ]
+        )
+
+        refreshBulletins()
+        refreshBulletinModeration()
+
+        return BulletinPost(
+            bulletinID: bulletinID,
+            title: title,
+            category: category,
+            body: body,
+            phone: phone,
+            latitude: latitude,
+            longitude: longitude,
+            plusCode: plusCode,
+            eAddress: eAddress,
+            authorPubkey: author,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    func reportBulletin(bulletinID: String, reason: String = "inaccurate") {
+        let now = Int(Date().timeIntervalSince1970)
+        let reporter = currentAuthorPubkey()
+        _ = execute(
+            """
+            INSERT OR REPLACE INTO bulletin_reports (
+                bulletin_id, reporter_pubkey, reason, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            binds: [.text(bulletinID), .text(reporter), .text(reason), .int(now)]
+        )
+    }
+
+    func setBulletinAuthorMuted(_ authorPubkey: String, muted: Bool) {
+        let author = authorPubkey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !author.isEmpty else { return }
+        let now = Int(Date().timeIntervalSince1970)
+        if muted {
+            _ = execute(
+                "INSERT OR REPLACE INTO bulletin_mutes (author_pubkey, created_at) VALUES (?, ?)",
+                binds: [.text(author), .int(now)]
+            )
+        } else {
+            _ = execute(
+                "DELETE FROM bulletin_mutes WHERE author_pubkey = ?",
+                binds: [.text(author)]
+            )
+        }
+        refreshBulletinModeration()
+    }
+
+    func isBulletinAuthorMuted(_ authorPubkey: String) -> Bool {
+        mutedBulletinAuthors.contains(authorPubkey.lowercased())
     }
 
     // MARK: - Promise Ledger
@@ -957,12 +1069,102 @@ final class SemayDataStore: ObservableObject {
         UserDefaults.standard.set(trimmedToken, forKey: hubIngestTokenKey)
     }
 
-    func syncOutboxToHub(limit: Int = 50) async -> OutboxSyncReport {
+    func hasConfiguredNode() -> Bool {
+        !hubBaseURLString().isEmpty
+    }
+
+    func syncOutboxToNostr(limit: Int = 50) async -> OutboxSyncReport {
+        var report = OutboxSyncReport()
+
+        var rows = upgradeOutboxRowsWithSchnorr(loadDueOutboxRows(limit: limit))
+        rows = locallyValidatedRows(rows, report: &report)
+        guard !rows.isEmpty else { return report }
+        report.attempted = rows.count
+
+        for row in rows {
+            do {
+                let event = try makeNostrSemayEvent(from: row.envelope)
+                let relays = semayRelayTargets(for: row.envelope)
+                guard !relays.isEmpty else {
+                    markOutboxRetry(
+                        eventID: row.eventID,
+                        attempts: row.attempts + 1,
+                        error: "nostr-no-relays"
+                    )
+                    report.retried += 1
+                    continue
+                }
+                NostrRelayManager.shared.sendEvent(event, to: relays)
+                markOutboxDelivered(eventID: row.eventID)
+                report.delivered += 1
+            } catch {
+                let description = String(describing: error)
+                markOutboxRetry(
+                    eventID: row.eventID,
+                    attempts: row.attempts + 1,
+                    error: "nostr-send-\(description)"
+                )
+                report.retried += 1
+            }
+        }
+
+        refreshAll()
+        return report
+    }
+
+    func syncFeedFromNostr(limit: Int = 200) async -> FeedSyncReport {
+        var report = FeedSyncReport()
+        let cursorKey = "nostr.feed.created_at.v1"
+        let currentCursor = Int(loadSyncCursor(key: cursorKey) ?? "0") ?? 0
+        let geohashes = semaySyncGeohashes()
+        guard !geohashes.isEmpty else { return report }
+
+        let relays = semayRelayTargets(forGeohashes: geohashes)
+        guard !relays.isEmpty else { return report }
+
+        let safeLimit = max(20, min(limit, 500))
+        let sinceDate: Date? = currentCursor > 0
+            ? Date(timeIntervalSince1970: TimeInterval(max(0, currentCursor - 120)))
+            : nil
+        let filter = NostrFilter.geohashNotes(Array(geohashes), since: sinceDate, limit: safeLimit)
+        let events = await collectNostrEvents(filter: filter, relays: relays, timeoutSeconds: 8)
+        report.fetched = events.count
+
+        var maxCreatedAt = currentCursor
+        var seenEnvelopeIDs: Set<String> = []
+
+        for event in events {
+            guard event.tags.contains(where: { tag in
+                tag.count >= 2 && tag[0].lowercased() == "t" && tag[1].lowercased() == semayNostrTag
+            }) else {
+                report.skipped += 1
+                continue
+            }
+            guard let envelope = decodeSemayEnvelope(from: event) else {
+                report.skipped += 1
+                continue
+            }
+            guard seenEnvelopeIDs.insert(envelope.eventID).inserted else {
+                continue
+            }
+            maxCreatedAt = max(maxCreatedAt, envelope.createdAt)
+            if applyInboundEnvelope(envelope) {
+                report.applied += 1
+            } else {
+                report.skipped += 1
+            }
+        }
+
+        saveSyncCursor(key: cursorKey, value: String(maxCreatedAt))
+        refreshAll()
+        return report
+    }
+
+    func syncOutboxToHub(limit: Int = 50, allowDiscovery: Bool = false) async -> OutboxSyncReport {
         var report = OutboxSyncReport()
 
         var endpointURL = makeHubBatchEndpointURL()
-        if endpointURL == nil {
-            // Auto-discover a reachable node when the user creates events but never touched Advanced settings.
+        if endpointURL == nil, allowDiscovery {
             do {
                 _ = try await SemayNodeDiscoveryService.shared.resolveBaseURL(forceDiscovery: true)
             } catch {
@@ -972,60 +1174,11 @@ final class SemayDataStore: ObservableObject {
             endpointURL = makeHubBatchEndpointURL()
         }
         guard let endpointURL else {
-            report.errorMessage = "node-url-missing-or-invalid"
             return report
         }
 
-        var rows = loadDueOutboxRows(limit: limit)
-        guard !rows.isEmpty else { return report }
-
-        // Upgrade legacy pseudo-signed outbox rows to real Schnorr signatures before sending.
-        if let identity = try? idBridge.getCurrentNostrIdentity() {
-            var upgraded: [OutboxEnvelopeRow] = []
-            upgraded.reserveCapacity(rows.count)
-            for row in rows {
-                if row.envelope.signature.count == 64 {
-                    if let upgradedEnvelope = try? SemayEventEnvelope.signed(
-                        eventType: row.envelope.eventType,
-                        entityID: row.envelope.entityID,
-                        identity: identity,
-                        lamportClock: row.envelope.lamportClock,
-                        expiresAt: row.envelope.expiresAt,
-                        payload: row.envelope.payload,
-                        eventID: row.envelope.eventID,
-                        createdAt: row.envelope.createdAt
-                    ) {
-                        updateOutboxEnvelopeJSON(eventID: row.eventID, envelope: upgradedEnvelope)
-                        upgraded.append(
-                            OutboxEnvelopeRow(
-                                eventID: row.eventID,
-                                envelope: upgradedEnvelope,
-                                attempts: row.attempts
-                            )
-                        )
-                        continue
-                    }
-                }
-                upgraded.append(row)
-            }
-            rows = upgraded
-        }
-
-        var validRows: [OutboxEnvelopeRow] = []
-        for row in rows {
-            if let failure = row.envelope.validate() {
-                markOutboxFailed(
-                    eventID: row.eventID,
-                    attempts: row.attempts + 1,
-                    error: "local-validation-\(failure.category.rawValue):\(failure.reason)"
-                )
-                report.failed += 1
-            } else {
-                validRows.append(row)
-            }
-        }
-
-        rows = validRows
+        var rows = upgradeOutboxRowsWithSchnorr(loadDueOutboxRows(limit: limit))
+        rows = locallyValidatedRows(rows, report: &report)
         guard !rows.isEmpty else { return report }
         report.attempted = rows.count
 
@@ -1076,11 +1229,11 @@ final class SemayDataStore: ObservableObject {
         return report
     }
 
-    func syncFeedFromHub(limit: Int = 200) async -> FeedSyncReport {
+    func syncFeedFromHub(limit: Int = 200, allowDiscovery: Bool = false) async -> FeedSyncReport {
         var report = FeedSyncReport()
 
         var baseURL = hubBaseURLString()
-        if baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, allowDiscovery {
             do {
                 _ = try await SemayNodeDiscoveryService.shared.resolveBaseURL(forceDiscovery: true)
             } catch {
@@ -1090,8 +1243,7 @@ final class SemayDataStore: ObservableObject {
             baseURL = hubBaseURLString()
         }
 
-        guard let root = URL(string: baseURL) else {
-            report.errorMessage = "node-url-missing-or-invalid"
+        guard let root = URL(string: baseURL), !baseURL.isEmpty else {
             return report
         }
 
@@ -1212,6 +1364,8 @@ final class SemayDataStore: ObservableObject {
     func refreshAll() {
         refreshPins()
         refreshBusinesses()
+        refreshBulletins()
+        refreshBulletinModeration()
         refreshPromises()
         expireDuePromises()
     }
@@ -1314,6 +1468,63 @@ final class SemayDataStore: ObservableObject {
             )
         }
         businesses = mapped
+    }
+
+    private func refreshBulletins() {
+        let rows = query(
+            """
+            SELECT bulletin_id, title, category, body, phone, latitude, longitude, plus_code, e_address,
+                   author_pubkey, created_at, updated_at
+            FROM bulletins
+            ORDER BY updated_at DESC
+            """
+        )
+
+        let mapped = rows.compactMap { row -> BulletinPost? in
+            guard let bulletinID = row["bulletin_id"] as? String,
+                  let title = row["title"] as? String,
+                  let categoryRaw = row["category"] as? String,
+                  let body = row["body"] as? String,
+                  let plusCode = row["plus_code"] as? String,
+                  let eAddress = row["e_address"] as? String,
+                  let authorPubkey = row["author_pubkey"] as? String,
+                  let createdAt = row["created_at"] as? Int,
+                  let updatedAt = row["updated_at"] as? Int else {
+                return nil
+            }
+
+            let category = BulletinCategory(rawValue: categoryRaw) ?? .general
+            let phone = (row["phone"] as? String) ?? ""
+            let latitude = (row["latitude"] as? Double) ?? Double(row["latitude"] as? Int ?? 0)
+            let longitude = (row["longitude"] as? Double) ?? Double(row["longitude"] as? Int ?? 0)
+
+            return BulletinPost(
+                bulletinID: bulletinID,
+                title: title,
+                category: category,
+                body: body,
+                phone: phone,
+                latitude: latitude,
+                longitude: longitude,
+                plusCode: plusCode,
+                eAddress: eAddress,
+                authorPubkey: authorPubkey.lowercased(),
+                createdAt: createdAt,
+                updatedAt: updatedAt
+            )
+        }
+        bulletins = mapped
+    }
+
+    private func refreshBulletinModeration() {
+        let rows = query("SELECT author_pubkey FROM bulletin_mutes")
+        var muted: Set<String> = []
+        for row in rows {
+            if let author = row["author_pubkey"] as? String, !author.isEmpty {
+                muted.insert(author.lowercased())
+            }
+        }
+        mutedBulletinAuthors = muted
     }
 
     private func refreshPromises() {
@@ -1462,6 +1673,37 @@ final class SemayDataStore: ObservableObject {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS bulletins (
+                bulletin_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                body TEXT NOT NULL,
+                phone TEXT NOT NULL DEFAULT '',
+                latitude REAL NOT NULL DEFAULT 0,
+                longitude REAL NOT NULL DEFAULT 0,
+                plus_code TEXT NOT NULL DEFAULT '',
+                e_address TEXT NOT NULL,
+                author_pubkey TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS bulletin_reports (
+                bulletin_id TEXT NOT NULL,
+                reporter_pubkey TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (bulletin_id, reporter_pubkey)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS bulletin_mutes (
+                author_pubkey TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS sync_cursor (
                 key TEXT PRIMARY KEY,
                 cursor_value TEXT NOT NULL,
@@ -1516,6 +1758,10 @@ final class SemayDataStore: ObservableObject {
         ensureColumn(table: "business_profiles", column: "phone", definition: "TEXT NOT NULL DEFAULT ''")
         ensureColumn(table: "business_profiles", column: "lightning_link", definition: "TEXT NOT NULL DEFAULT ''")
         ensureColumn(table: "business_profiles", column: "cashu_link", definition: "TEXT NOT NULL DEFAULT ''")
+        ensureColumn(table: "bulletins", column: "phone", definition: "TEXT NOT NULL DEFAULT ''")
+        ensureColumn(table: "bulletins", column: "latitude", definition: "REAL NOT NULL DEFAULT 0")
+        ensureColumn(table: "bulletins", column: "longitude", definition: "REAL NOT NULL DEFAULT 0")
+        ensureColumn(table: "bulletins", column: "plus_code", definition: "TEXT NOT NULL DEFAULT ''")
 
         backfillAddressesIfNeeded()
     }
@@ -1580,6 +1826,33 @@ final class SemayDataStore: ObservableObject {
                     .text(address.eAddress),
                     .int(Int(Date().timeIntervalSince1970)),
                     .text(businessID)
+                ]
+            )
+        }
+
+        let bulletinRows = query("SELECT bulletin_id, latitude, longitude, plus_code, e_address FROM bulletins")
+        for row in bulletinRows {
+            guard let bulletinID = row["bulletin_id"] as? String,
+                  let latitudeAny = row["latitude"],
+                  let longitudeAny = row["longitude"] else { continue }
+            let latitude = (latitudeAny as? Double) ?? Double(latitudeAny as? Int ?? 0)
+            let longitude = (longitudeAny as? Double) ?? Double(longitudeAny as? Int ?? 0)
+            guard latitude != 0, longitude != 0 else { continue }
+
+            let currentPlus = (row["plus_code"] as? String) ?? ""
+            let currentE = (row["e_address"] as? String) ?? ""
+            let address = SemayAddress.eAddress(latitude: latitude, longitude: longitude)
+            if currentPlus == address.plusCode, currentE == address.eAddress {
+                continue
+            }
+
+            _ = execute(
+                "UPDATE bulletins SET plus_code = ?, e_address = ?, updated_at = ? WHERE bulletin_id = ?",
+                binds: [
+                    .text(address.plusCode),
+                    .text(address.eAddress),
+                    .int(Int(Date().timeIntervalSince1970)),
+                    .text(bulletinID)
                 ]
             )
         }
@@ -1719,9 +1992,9 @@ final class SemayDataStore: ObservableObject {
         payload: [String: String],
         expiresAt: Int? = nil
     ) {
-        // Hostile-default privacy: only upload public directory events by default.
-        // Promise lifecycle events are peer-to-peer and should not be sent to a public node/hub.
-        guard shouldUploadToHub(type) else { return }
+        // Hostile-default privacy: only sync public directory events by default.
+        // Promise lifecycle events are peer-to-peer and not broadcast to shared transports.
+        guard shouldSyncOutboxEvent(type) else { return }
 
         let lamport = nextLamportClock()
         let envelope: SemayEventEnvelope
@@ -1777,11 +2050,11 @@ final class SemayDataStore: ObservableObject {
         _ = execute(sql, binds: [.text(envelope.eventID), .text(json), .int(now), .int(now)])
     }
 
-    private func shouldUploadToHub(_ type: SemayEventEnvelope.EventType) -> Bool {
+    private func shouldSyncOutboxEvent(_ type: SemayEventEnvelope.EventType) -> Bool {
         switch type {
-        case .pinCreate, .pinUpdate, .pinApproval, .businessRegister:
+        case .pinCreate, .pinUpdate, .pinApproval, .businessRegister, .businessUpdate, .bulletinPost, .routeCurated:
             return true
-        case .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage:
+        case .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage, .chatAck:
             return false
         }
     }
@@ -1821,6 +2094,232 @@ final class SemayDataStore: ObservableObject {
             .appendingPathComponent("chat")
             .appendingPathComponent("api")
             .appendingPathComponent("envelopes")
+    }
+
+    private func upgradeOutboxRowsWithSchnorr(_ rows: [OutboxEnvelopeRow]) -> [OutboxEnvelopeRow] {
+        guard let identity = try? idBridge.getCurrentNostrIdentity() else {
+            return rows
+        }
+
+        var upgraded: [OutboxEnvelopeRow] = []
+        upgraded.reserveCapacity(rows.count)
+
+        for row in rows {
+            if row.envelope.signature.count == 64,
+               let upgradedEnvelope = try? SemayEventEnvelope.signed(
+                eventType: row.envelope.eventType,
+                entityID: row.envelope.entityID,
+                identity: identity,
+                lamportClock: row.envelope.lamportClock,
+                expiresAt: row.envelope.expiresAt,
+                payload: row.envelope.payload,
+                eventID: row.envelope.eventID,
+                createdAt: row.envelope.createdAt
+               ) {
+                updateOutboxEnvelopeJSON(eventID: row.eventID, envelope: upgradedEnvelope)
+                upgraded.append(
+                    OutboxEnvelopeRow(
+                        eventID: row.eventID,
+                        envelope: upgradedEnvelope,
+                        attempts: row.attempts
+                    )
+                )
+            } else {
+                upgraded.append(row)
+            }
+        }
+        return upgraded
+    }
+
+    private func locallyValidatedRows(_ rows: [OutboxEnvelopeRow], report: inout OutboxSyncReport) -> [OutboxEnvelopeRow] {
+        var validRows: [OutboxEnvelopeRow] = []
+        validRows.reserveCapacity(rows.count)
+        for row in rows {
+            if let failure = row.envelope.validate() {
+                markOutboxFailed(
+                    eventID: row.eventID,
+                    attempts: row.attempts + 1,
+                    error: "local-validation-\(failure.category.rawValue):\(failure.reason)"
+                )
+                report.failed += 1
+            } else {
+                validRows.append(row)
+            }
+        }
+        return validRows
+    }
+
+    private func makeNostrSemayEvent(from envelope: SemayEventEnvelope) throws -> NostrEvent {
+        guard let identity = try idBridge.getCurrentNostrIdentity() else {
+            throw NSError(
+                domain: "semay.nostr",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "nostr-identity-unavailable"]
+            )
+        }
+
+        let data = try JSONEncoder().encode(envelope)
+        let encoded = Base64URL.encode(data)
+        let content = "\(semayNostrContentPrefix)\(encoded)"
+
+        var tags: [[String]] = [
+            ["t", semayNostrTag],
+            ["event_id", envelope.eventID],
+            ["event_type", envelope.eventType.rawValue],
+        ]
+        if let geohash = semayEventGeohash(envelope) {
+            tags.append(["g", geohash])
+        }
+
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex.lowercased(),
+            createdAt: Date(timeIntervalSince1970: TimeInterval(max(0, envelope.createdAt))),
+            kind: .textNote,
+            tags: tags,
+            content: content
+        )
+        return try event.sign(with: identity.schnorrSigningKey())
+    }
+
+    private func decodeSemayEnvelope(from event: NostrEvent) -> SemayEventEnvelope? {
+        guard event.kind == NostrProtocol.EventKind.textNote.rawValue else { return nil }
+        guard event.content.hasPrefix(semayNostrContentPrefix) else { return nil }
+        guard event.isValidSignature() else { return nil }
+
+        let encoded = String(event.content.dropFirst(semayNostrContentPrefix.count))
+        guard let data = Base64URL.decode(encoded),
+              let envelope = try? JSONDecoder().decode(SemayEventEnvelope.self, from: data) else {
+            return nil
+        }
+        guard envelope.authorPubkey.lowercased() == event.pubkey.lowercased() else { return nil }
+        guard envelope.validate() == nil else { return nil }
+        return envelope
+    }
+
+    private func collectNostrEvents(
+        filter: NostrFilter,
+        relays: [String],
+        timeoutSeconds: TimeInterval
+    ) async -> [NostrEvent] {
+        guard !relays.isEmpty else { return [] }
+        let subscriptionID = "semay-feed-\(UUID().uuidString.prefix(8))"
+
+        return await withCheckedContinuation { continuation in
+            var seenEventIDs: Set<String> = []
+            var events: [NostrEvent] = []
+            var finished = false
+
+            @MainActor
+            func finish() {
+                guard !finished else { return }
+                finished = true
+                NostrRelayManager.shared.unsubscribe(id: subscriptionID)
+                continuation.resume(returning: events)
+            }
+
+            NostrRelayManager.shared.subscribe(
+                filter: filter,
+                id: subscriptionID,
+                relayUrls: relays,
+                handler: { event in
+                    guard seenEventIDs.insert(event.id).inserted else { return }
+                    events.append(event)
+                },
+                onEOSE: {
+                    Task { @MainActor in
+                        finish()
+                    }
+                }
+            )
+
+            Task { @MainActor in
+                let nanos = UInt64((max(1, timeoutSeconds) * 1_000_000_000).rounded())
+                try? await Task.sleep(nanoseconds: nanos)
+                finish()
+            }
+        }
+    }
+
+    private func semayRelayTargets(for envelope: SemayEventEnvelope) -> [String] {
+        if let geohash = semayEventGeohash(envelope) {
+            return semayRelayTargets(forGeohashes: Set([geohash]))
+        }
+        return semayRelayTargets(forGeohashes: semayAnchorGeohashes())
+    }
+
+    private func semayRelayTargets(forGeohashes geohashes: Set<String>) -> [String] {
+        var urls: [String] = []
+        var seen: Set<String> = []
+        let count = max(3, TransportConfig.nostrGeoRelayCount)
+
+        for geohash in geohashes {
+            let relays = GeoRelayDirectory.shared.closestRelays(toGeohash: geohash, count: count)
+            for relay in relays {
+                if seen.insert(relay).inserted {
+                    urls.append(relay)
+                }
+            }
+        }
+        return urls
+    }
+
+    private func semaySyncGeohashes() -> Set<String> {
+        var geohashes = semayAnchorGeohashes()
+        for pin in pins.prefix(32) {
+            geohashes.insert(Geohash.encode(latitude: pin.latitude, longitude: pin.longitude, precision: 5).lowercased())
+        }
+        for business in businesses.prefix(32) {
+            geohashes.insert(Geohash.encode(latitude: business.latitude, longitude: business.longitude, precision: 5).lowercased())
+        }
+        return geohashes
+    }
+
+    private func semayAnchorGeohashes() -> Set<String> {
+        let anchors: [(Double, Double)] = [
+            (15.3229, 38.9251), // Asmara
+            (8.9806, 38.7578),  // Addis Ababa
+        ]
+        return Set(anchors.map { Geohash.encode(latitude: $0.0, longitude: $0.1, precision: 5).lowercased() })
+    }
+
+    private func semayEventGeohash(_ envelope: SemayEventEnvelope) -> String? {
+        if let geohash = geohashFromPayload(envelope.payload) {
+            return geohash
+        }
+
+        if envelope.eventType == .pinApproval,
+           let pinID = envelope.payload["pin_id"] {
+            let rows = query(
+                "SELECT latitude, longitude FROM pins WHERE pin_id = ? LIMIT 1",
+                binds: [.text(pinID)]
+            )
+            if let row = rows.first {
+                let lat = (row["latitude"] as? Double) ?? Double(row["latitude"] as? Int ?? 0)
+                let lon = (row["longitude"] as? Double) ?? Double(row["longitude"] as? Int ?? 0)
+                if abs(lat) <= 90, abs(lon) <= 180, !(lat == 0 && lon == 0) {
+                    return Geohash.encode(latitude: lat, longitude: lon, precision: 5).lowercased()
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func geohashFromPayload(_ payload: [String: String]) -> String? {
+        if let latitude = Double(payload["latitude"] ?? ""),
+           let longitude = Double(payload["longitude"] ?? ""),
+           abs(latitude) <= 90,
+           abs(longitude) <= 180,
+           !(latitude == 0 && longitude == 0) {
+            return Geohash.encode(latitude: latitude, longitude: longitude, precision: 5).lowercased()
+        }
+
+        let plusCode = payload["plus_code"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !plusCode.isEmpty, let area = OpenLocationCode.decode(plusCode) {
+            return Geohash.encode(latitude: area.centerLatitude, longitude: area.centerLongitude, precision: 5).lowercased()
+        }
+
+        return nil
     }
 
     private func loadDueOutboxRows(limit: Int) -> [OutboxEnvelopeRow] {
@@ -1997,9 +2496,11 @@ final class SemayDataStore: ObservableObject {
             return applyInboundPin(envelope)
         case .pinApproval:
             return applyInboundPinApproval(envelope)
-        case .businessRegister:
+        case .businessRegister, .businessUpdate:
             return applyInboundBusiness(envelope)
-        case .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage:
+        case .bulletinPost:
+            return applyInboundBulletin(envelope)
+        case .routeCurated, .promiseCreate, .promiseAccept, .promiseReject, .promiseSettle, .chatMessage, .chatAck:
             return false
         }
     }
@@ -2121,6 +2622,51 @@ final class SemayDataStore: ObservableObject {
                 .double(lat), .double(lon), .text(plusCode), .text(eAddress), .text(phone),
                 .text(lightningLink), .text(cashuLink),
                 .text(owner), .text(qrPayload), .int(ts), .int(ts)
+            ]
+        )
+    }
+
+    private func applyInboundBulletin(_ envelope: SemayEventEnvelope) -> Bool {
+        let payload = envelope.payload
+        guard let bulletinID = payload["bulletin_id"], !bulletinID.isEmpty else { return false }
+        guard let title = payload["title"], !title.isEmpty else { return false }
+        let category = payload["category"] ?? BulletinCategory.general.rawValue
+        let body = payload["body"] ?? ""
+        let phone = payload["phone"] ?? ""
+        guard let lat = Double(payload["latitude"] ?? ""),
+              let lon = Double(payload["longitude"] ?? "") else { return false }
+
+        let address = SemayAddress.eAddress(latitude: lat, longitude: lon)
+        let plusCode = (payload["plus_code"] ?? "").isEmpty ? address.plusCode : (payload["plus_code"] ?? "")
+        let eAddress = (payload["e_address"] ?? "").isEmpty ? address.eAddress : (payload["e_address"] ?? "")
+        let author = envelope.authorPubkey.lowercased()
+        let ts = envelope.createdAt
+
+        let sql = """
+        INSERT INTO bulletins (
+            bulletin_id, title, category, body, phone, latitude, longitude,
+            plus_code, e_address, author_pubkey, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bulletin_id) DO UPDATE SET
+            title = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.title ELSE bulletins.title END,
+            category = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.category ELSE bulletins.category END,
+            body = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.body ELSE bulletins.body END,
+            phone = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.phone ELSE bulletins.phone END,
+            latitude = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.latitude ELSE bulletins.latitude END,
+            longitude = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.longitude ELSE bulletins.longitude END,
+            plus_code = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.plus_code ELSE bulletins.plus_code END,
+            e_address = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.e_address ELSE bulletins.e_address END,
+            author_pubkey = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.author_pubkey ELSE bulletins.author_pubkey END,
+            updated_at = CASE WHEN excluded.updated_at >= bulletins.updated_at THEN excluded.updated_at ELSE bulletins.updated_at END
+        """
+
+        return execute(
+            sql,
+            binds: [
+                .text(bulletinID), .text(title), .text(category), .text(body), .text(phone),
+                .double(lat), .double(lon),
+                .text(plusCode), .text(eAddress), .text(author),
+                .int(ts), .int(ts)
             ]
         )
     }

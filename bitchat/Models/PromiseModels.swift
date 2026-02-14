@@ -298,3 +298,101 @@ struct BusinessProfile: Codable, Identifiable, Equatable {
         updatedAt = try c.decode(Int.self, forKey: .updatedAt)
     }
 }
+
+enum BulletinCategory: String, Codable, CaseIterable, Identifiable {
+    case tourism
+    case services
+    case safety
+    case logistics
+    case opportunity
+    case general
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .tourism: return "Tourism"
+        case .services: return "Services"
+        case .safety: return "Safety"
+        case .logistics: return "Logistics"
+        case .opportunity: return "Opportunities"
+        case .general: return "General"
+        }
+    }
+}
+
+struct BulletinPost: Codable, Identifiable, Equatable {
+    let bulletinID: String
+    var title: String
+    var category: BulletinCategory
+    var body: String
+    var phone: String
+    var latitude: Double
+    var longitude: Double
+    var plusCode: String
+    var eAddress: String
+    var authorPubkey: String
+    let createdAt: Int
+    var updatedAt: Int
+
+    var id: String { bulletinID }
+
+    enum CodingKeys: String, CodingKey {
+        case bulletinID = "bulletin_id"
+        case title
+        case category
+        case body
+        case phone
+        case latitude
+        case longitude
+        case plusCode = "plus_code"
+        case eAddress = "e_address"
+        case authorPubkey = "author_pubkey"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    init(
+        bulletinID: String,
+        title: String,
+        category: BulletinCategory,
+        body: String,
+        phone: String = "",
+        latitude: Double,
+        longitude: Double,
+        plusCode: String = "",
+        eAddress: String,
+        authorPubkey: String,
+        createdAt: Int,
+        updatedAt: Int
+    ) {
+        self.bulletinID = bulletinID
+        self.title = title
+        self.category = category
+        self.body = body
+        self.phone = phone
+        self.latitude = latitude
+        self.longitude = longitude
+        self.plusCode = plusCode
+        self.eAddress = eAddress
+        self.authorPubkey = authorPubkey
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bulletinID = try c.decode(String.self, forKey: .bulletinID)
+        title = try c.decode(String.self, forKey: .title)
+        category = try c.decodeIfPresent(BulletinCategory.self, forKey: .category) ?? .general
+        body = try c.decode(String.self, forKey: .body)
+        phone = try c.decodeIfPresent(String.self, forKey: .phone) ?? ""
+        latitude = try c.decodeIfPresent(Double.self, forKey: .latitude) ?? 0
+        longitude = try c.decodeIfPresent(Double.self, forKey: .longitude) ?? 0
+        plusCode = try c.decodeIfPresent(String.self, forKey: .plusCode) ?? ""
+        eAddress = try c.decode(String.self, forKey: .eAddress)
+        authorPubkey = try c.decode(String.self, forKey: .authorPubkey)
+        createdAt = try c.decode(Int.self, forKey: .createdAt)
+        updatedAt = try c.decode(Int.self, forKey: .updatedAt)
+    }
+}

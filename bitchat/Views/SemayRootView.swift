@@ -366,7 +366,7 @@ private struct SemayMapTabView: View {
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "magnifyingglass")
-                                Text("Search places, businesses, plus codes")
+                                Text("Search places, businesses, bulletins, plus codes")
                                     .lineLimit(1)
                                 Spacer()
                             }
@@ -593,6 +593,7 @@ private struct SemayMapTabView: View {
                     region: $region,
                     pins: dataStore.pins,
                     businesses: dataStore.businesses,
+                    bulletins: dataStore.visibleBulletins(),
                     libraryStore: libraryStore,
                     selectedPinID: Binding(
                         get: { navigation.selectedPinID },
@@ -1446,10 +1447,13 @@ private final class MBTilesOverlay: MKTileOverlay {
 #endif
 
 private struct SemayExploreSheet: View {
+    @EnvironmentObject private var dataStore: SemayDataStore
+    @Environment(\.openURL) private var openURL
     @Binding var isPresented: Bool
     @Binding var region: MKCoordinateRegion
     let pins: [SemayMapPin]
     let businesses: [BusinessProfile]
+    let bulletins: [BulletinPost]
     @ObservedObject var libraryStore: LibraryPackStore
     @Binding var selectedPinID: String?
     @Binding var selectedBusinessID: String?
@@ -1460,10 +1464,13 @@ private struct SemayExploreSheet: View {
     @State private var installingLibraryPack = false
     @State private var libraryError: String?
     @State private var readerItem: SemayLibraryItem?
+    @State private var showBulletinComposer = false
+    @State private var bulletinActionMessage: String?
 
     private enum Segment: String, CaseIterable, Identifiable {
         case places = "Places"
         case businesses = "Businesses"
+        case bulletins = "Bulletins"
         case library = "Library"
         case routes = "Routes"
 
@@ -1474,7 +1481,7 @@ private struct SemayExploreSheet: View {
         NavigationStack {
             VStack(spacing: 12) {
                 VStack(spacing: 10) {
-                    TextField("Search name, category, plus code, or E-address", text: $query)
+                    TextField("Search places, businesses, bulletins, plus code, or E-address", text: $query)
                         .textFieldStyle(.roundedBorder)
                         .semayDisableAutoCaps()
                         .semayDisableAutocorrection()
@@ -1516,6 +1523,8 @@ private struct SemayExploreSheet: View {
                         placesSection
                     case .businesses:
                         businessesSection
+                    case .bulletins:
+                        bulletinsSection
                     case .library:
                         librarySection
                     case .routes:
@@ -1535,6 +1544,20 @@ private struct SemayExploreSheet: View {
             }
             .sheet(item: $readerItem) { item in
                 SemayLibraryReaderSheet(item: item)
+            }
+            .sheet(isPresented: $showBulletinComposer) {
+                SemayBulletinComposerSheet(isPresented: $showBulletinComposer)
+                    .environmentObject(dataStore)
+            }
+            .alert("Bulletins", isPresented: Binding(
+                get: { bulletinActionMessage != nil },
+                set: { if !$0 { bulletinActionMessage = nil } }
+            )) {
+                Button("OK") { bulletinActionMessage = nil }
+            } message: {
+                if let bulletinActionMessage {
+                    Text(bulletinActionMessage)
+                }
             }
         }
     }
@@ -1574,6 +1597,19 @@ private struct SemayExploreSheet: View {
                 || b.eAddress.lowercased().contains(q)
                 || b.plusCode.lowercased().contains(q)
                 || b.phone.lowercased().contains(q)
+        }
+    }
+
+    private var filteredBulletins: [BulletinPost] {
+        let q = normalizedQuery
+        if q.isEmpty { return bulletins }
+        return bulletins.filter { item in
+            item.title.lowercased().contains(q)
+                || item.body.lowercased().contains(q)
+                || item.category.rawValue.lowercased().contains(q)
+                || item.plusCode.lowercased().contains(q)
+                || item.eAddress.lowercased().contains(q)
+                || item.phone.lowercased().contains(q)
         }
     }
 
@@ -1653,6 +1689,84 @@ private struct SemayExploreSheet: View {
     }
 
     @ViewBuilder
+    private var bulletinsSection: some View {
+        Section {
+            Button {
+                showBulletinComposer = true
+            } label: {
+                Label("Post Bulletin", systemImage: "plus.bubble")
+            }
+
+            if filteredBulletins.isEmpty {
+                Text("No bulletins match your search.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(filteredBulletins) { bulletin in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(bulletin.title)
+                                .font(.headline)
+                            Spacer()
+                            Text(bulletin.category.title)
+                                .font(.caption2)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.thinMaterial, in: Capsule())
+                        }
+                        Text(bulletin.body)
+                            .font(.subheadline)
+                        Text("Updated \(Date(timeIntervalSince1970: TimeInterval(bulletin.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        if !bulletin.plusCode.isEmpty {
+                            Text("\(bulletin.eAddress) • \(bulletin.plusCode)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Button("Open") {
+                                focus(latitude: bulletin.latitude, longitude: bulletin.longitude)
+                                selectedPinID = nil
+                                selectedBusinessID = nil
+                                isPresented = false
+                            }
+                            .buttonStyle(.bordered)
+                            if let url = telURL(for: bulletin.phone) {
+                                Button("Call") {
+                                    openURL(url)
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            Menu("More") {
+                                if dataStore.isBulletinAuthorMuted(bulletin.authorPubkey) {
+                                    Button("Unmute Author") {
+                                        dataStore.setBulletinAuthorMuted(bulletin.authorPubkey, muted: false)
+                                        bulletinActionMessage = "Author unmuted."
+                                    }
+                                } else {
+                                    Button("Mute Author") {
+                                        dataStore.setBulletinAuthorMuted(bulletin.authorPubkey, muted: true)
+                                        bulletinActionMessage = "Muted this author."
+                                    }
+                                }
+                                Button("Report") {
+                                    dataStore.reportBulletin(bulletinID: bulletin.bulletinID, reason: "community-report")
+                                    bulletinActionMessage = "Thanks. Bulletin reported."
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        } header: {
+            Text("Bulletins")
+        } footer: {
+            Text("Community posts for tourism, services, safety, logistics, and opportunities.")
+        }
+    }
+
+    @ViewBuilder
     private var librarySection: some View {
         Section {
             if libraryStore.packs.isEmpty {
@@ -1726,6 +1840,14 @@ private struct SemayExploreSheet: View {
             span: MKCoordinateSpan(latitudeDelta: latSpan, longitudeDelta: lonSpan)
         )
     }
+
+    private func telURL(for rawPhone: String) -> URL? {
+        let cleaned = rawPhone
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .filter { "+0123456789".contains($0) }
+        guard !cleaned.isEmpty else { return nil }
+        return URL(string: "tel:\(cleaned)")
+    }
 }
 
 private struct SemayLibraryReaderSheet: View {
@@ -1743,6 +1865,129 @@ private struct SemayLibraryReaderSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+private struct SemayBulletinComposerSheet: View {
+    @EnvironmentObject private var dataStore: SemayDataStore
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var locationState = LocationStateManager.shared
+
+    @Binding var isPresented: Bool
+    @State private var title = ""
+    @State private var category: BulletinCategory = .general
+    @State private var detailsText = ""
+    @State private var phone = ""
+    @State private var latitude = "15.3229"
+    @State private var longitude = "38.9251"
+    @State private var showCoordinateEditor = false
+    @State private var error: String?
+
+    private var parsedCoordinate: CLLocationCoordinate2D? {
+        guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+
+    private var computedAddress: (plus: String, e: String) {
+        guard let coord = parsedCoordinate else { return ("", "") }
+        let addr = SemayAddress.eAddress(latitude: coord.latitude, longitude: coord.longitude)
+        return (addr.plusCode, addr.eAddress)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Title", text: $title)
+                Picker("Category", selection: $category) {
+                    ForEach(BulletinCategory.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                TextField("Details", text: $detailsText, axis: .vertical)
+                    .lineLimit(4...8)
+                TextField("Phone (Optional)", text: $phone)
+                    .semayPhoneKeyboard()
+
+                Section("Location") {
+                    if let coord = parsedCoordinate {
+                        Text(String(format: "Lat %.6f, Lon %.6f", coord.latitude, coord.longitude))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Use Current Location") {
+                        if locationState.permissionState != .authorized {
+                            locationState.enableLocationChannels()
+                            error = "Enable location access to use your current position."
+                            return
+                        }
+                        guard let loc = locationState.lastKnownLocation else {
+                            locationState.refreshChannels()
+                            error = "Getting your location. Please try again in a moment."
+                            return
+                        }
+                        latitude = String(format: "%.6f", loc.coordinate.latitude)
+                        longitude = String(format: "%.6f", loc.coordinate.longitude)
+                        error = nil
+                    }
+
+                    Toggle("Edit Coordinates", isOn: $showCoordinateEditor)
+                    if showCoordinateEditor {
+                        TextField("Latitude", text: $latitude)
+                        TextField("Longitude", text: $longitude)
+                    }
+                }
+
+                if !computedAddress.plus.isEmpty {
+                    Section("Address") {
+                        Text("Plus Code: \(computedAddress.plus)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("E-Address: \(computedAddress.e)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                }
+            }
+            .navigationTitle("Post Bulletin")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        isPresented = false
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Post") {
+                        guard let coord = parsedCoordinate else {
+                            error = "Invalid latitude/longitude."
+                            return
+                        }
+                        _ = dataStore.postBulletin(
+                            title: title,
+                            category: category,
+                            body: detailsText,
+                            phone: phone,
+                            latitude: coord.latitude,
+                            longitude: coord.longitude
+                        )
+                        isPresented = false
+                        dismiss()
+                    }
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || detailsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || parsedCoordinate == nil)
+                }
+            }
+            .onAppear {
+                if locationState.permissionState == .authorized, let loc = locationState.lastKnownLocation {
+                    latitude = String(format: "%.6f", loc.coordinate.latitude)
+                    longitude = String(format: "%.6f", loc.coordinate.longitude)
                 }
             }
         }
@@ -2312,14 +2557,15 @@ private struct BusinessEditorSheet: View {
     }
 }
 
-	private struct SemayMeTabView: View {
-	    @EnvironmentObject private var dataStore: SemayDataStore
-	    @EnvironmentObject private var seedService: SeedPhraseService
-	    @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
-	    @StateObject private var safety = SafetyModeService.shared
-	    @StateObject private var envelopeSync = SemayEnvelopeSyncService.shared
-	    @StateObject private var tileStore = OfflineTileStore.shared
-	    @StateObject private var reachability = NetworkReachabilityService.shared
+		private struct SemayMeTabView: View {
+		    @EnvironmentObject private var dataStore: SemayDataStore
+		    @EnvironmentObject private var seedService: SeedPhraseService
+		    @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
+            @AppStorage("semay.icloud_backup_enabled") private var iCloudBackupEnabled = false
+		    @StateObject private var safety = SafetyModeService.shared
+		    @StateObject private var envelopeSync = SemayEnvelopeSyncService.shared
+		    @StateObject private var tileStore = OfflineTileStore.shared
+		    @StateObject private var reachability = NetworkReachabilityService.shared
 	
 	    @State private var revealPhrase = false
 	    @State private var showRestoreSeed = false
@@ -2336,6 +2582,9 @@ private struct BusinessEditorSheet: View {
 	    @State private var offlineMapsError = ""
             @State private var aboutTapCount = 0
             @State private var aboutNotice = ""
+            @State private var cloudBackupBusy = false
+            @State private var cloudBackupNotice = ""
+            @State private var cloudBackupError = ""
 	
 	    var body: some View {
 	        NavigationStack {
@@ -2401,6 +2650,40 @@ private struct BusinessEditorSheet: View {
                         showRestoreSeed = true
                     } label: {
                         Text("Restore From Seed (Replace Identity)")
+                    }
+                }
+
+                Section("iCloud Backup (Optional)") {
+                    Toggle("Enable iCloud Backup", isOn: $iCloudBackupEnabled)
+                    Text("Backs up private Semay settings and identity metadata encrypted with your seed-derived key. No plaintext seed is uploaded.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if iCloudBackupEnabled {
+                        Button(cloudBackupBusy ? "Syncing..." : "Backup Now") {
+                            Task {
+                                await uploadCloudBackup()
+                            }
+                        }
+                        .disabled(cloudBackupBusy)
+
+                        Button(cloudBackupBusy ? "Restoring..." : "Restore Backup") {
+                            Task {
+                                await restoreCloudBackup()
+                            }
+                        }
+                        .disabled(cloudBackupBusy)
+                    }
+
+                    if !cloudBackupNotice.isEmpty {
+                        Text(cloudBackupNotice)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !cloudBackupError.isEmpty {
+                        Text(cloudBackupError)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                     }
                 }
 
@@ -2653,6 +2936,44 @@ private struct BusinessEditorSheet: View {
 		            offlineMapsError = error.localizedDescription
 		        }
 		    }
+
+            private func uploadCloudBackup() async {
+                cloudBackupBusy = true
+                cloudBackupNotice = ""
+                cloudBackupError = ""
+                defer { cloudBackupBusy = false }
+                #if canImport(CloudKit)
+                do {
+                    try await seedService.uploadEncryptedBackupToICloud()
+                    cloudBackupNotice = "Backup uploaded to iCloud."
+                } catch {
+                    cloudBackupError = error.localizedDescription
+                }
+                #else
+                cloudBackupError = "iCloud backup is unavailable on this platform."
+                #endif
+            }
+
+            private func restoreCloudBackup() async {
+                cloudBackupBusy = true
+                cloudBackupNotice = ""
+                cloudBackupError = ""
+                defer { cloudBackupBusy = false }
+                #if canImport(CloudKit)
+                do {
+                    let restored = try await seedService.restoreEncryptedBackupFromICloud()
+                    if restored {
+                        cloudBackupNotice = "Backup restored from iCloud."
+                    } else {
+                        cloudBackupNotice = "No backup changes were applied."
+                    }
+                } catch {
+                    cloudBackupError = error.localizedDescription
+                }
+                #else
+                cloudBackupError = "iCloud backup is unavailable on this platform."
+                #endif
+            }
 
             private var appVersionString: String {
                 let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"

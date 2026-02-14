@@ -1,5 +1,8 @@
 import CryptoKit
 import Foundation
+#if canImport(CloudKit)
+import CloudKit
+#endif
 
 @MainActor
 final class SeedPhraseService: ObservableObject {
@@ -10,12 +13,58 @@ final class SeedPhraseService: ObservableObject {
         let secondIndex: Int
     }
 
+    struct IdentityBackupMetadata: Codable, Equatable {
+        let schemaVersion: String
+        let phraseFingerprint: String
+        let createdAt: Int
+        let backupCompleted: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case phraseFingerprint = "phrase_fingerprint"
+            case createdAt = "created_at"
+            case backupCompleted = "backup_completed"
+        }
+    }
+
+    struct UserPreferencesSnapshot: Codable, Equatable {
+        let safeModeEnabled: Bool
+        let readReceiptsEnabled: Bool
+        let presenceEnabled: Bool
+        let advancedSettingsEnabled: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case safeModeEnabled = "safe_mode_enabled"
+            case readReceiptsEnabled = "read_receipts_enabled"
+            case presenceEnabled = "presence_enabled"
+            case advancedSettingsEnabled = "advanced_settings_enabled"
+        }
+    }
+
+    struct FavoritesSnapshot: Codable, Equatable {
+        let favorites: [String]
+    }
+
+    private struct BackupEnvelope: Codable {
+        let identityMetadata: IdentityBackupMetadata
+        let preferences: UserPreferencesSnapshot
+        let favorites: FavoritesSnapshot
+
+        enum CodingKeys: String, CodingKey {
+            case identityMetadata = "identity_metadata"
+            case preferences
+            case favorites
+        }
+    }
+
     @Published private(set) var hasCompletedBackup: Bool
 
     private let keychain: KeychainManagerProtocol
     private let service = "chat.bitchat.seed"
     private let phraseKey = "mnemonic-v1"
     private let backupFlagKey = "semay.seed.backup.completed"
+    private let cloudRecordType = "SemayBackupV1"
+    private let cloudRecordName = "primary"
 
     private lazy var words: [String] = Self.loadWordlist()
 
@@ -132,6 +181,114 @@ final class SeedPhraseService: ObservableObject {
         guard let phrase = phrase() else { return nil }
         let digest = SHA256.hash(data: Data(phrase.utf8))
         return Data(digest)
+    }
+
+    func createIdentityBackupMetadata() -> IdentityBackupMetadata? {
+        guard let seed = derivedSeedMaterial() else { return nil }
+        return IdentityBackupMetadata(
+            schemaVersion: "1.0",
+            phraseFingerprint: seed.sha256Fingerprint().lowercased(),
+            createdAt: Int(Date().timeIntervalSince1970),
+            backupCompleted: hasCompletedBackup
+        )
+    }
+
+    #if canImport(CloudKit)
+    func uploadEncryptedBackupToICloud() async throws {
+        guard let metadata = createIdentityBackupMetadata() else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 20,
+                userInfo: [NSLocalizedDescriptionKey: "Identity seed is unavailable for backup."]
+            )
+        }
+
+        let defaults = UserDefaults.standard
+        let preferences = UserPreferencesSnapshot(
+            safeModeEnabled: (defaults.object(forKey: "semay.safe_mode_enabled") as? Bool) ?? true,
+            readReceiptsEnabled: (defaults.object(forKey: "semay.read_receipts_enabled") as? Bool) ?? false,
+            presenceEnabled: (defaults.object(forKey: "semay.presence_enabled") as? Bool) ?? false,
+            advancedSettingsEnabled: (defaults.object(forKey: "semay.settings.advanced") as? Bool) ?? false
+        )
+        let favorites = FavoritesSnapshot(favorites: [])
+        let envelope = BackupEnvelope(identityMetadata: metadata, preferences: preferences, favorites: favorites)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let plain = try encoder.encode(envelope)
+
+        guard let key = cloudEncryptionKey() else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 21,
+                userInfo: [NSLocalizedDescriptionKey: "Unable to derive backup encryption key."]
+            )
+        }
+        let sealed = try ChaChaPoly.seal(plain, using: key)
+        let combined = sealed.combined
+
+        let db = CKContainer.default().privateCloudDatabase
+        let recordID = CKRecord.ID(recordName: cloudRecordName)
+        let record = CKRecord(recordType: cloudRecordType, recordID: recordID)
+        record["blob"] = combined as CKRecordValue
+        record["schema_version"] = "1.0" as CKRecordValue
+        record["updated_at"] = Date() as CKRecordValue
+        try await db.save(record)
+    }
+
+    @discardableResult
+    func restoreEncryptedBackupFromICloud() async throws -> Bool {
+        guard let key = cloudEncryptionKey() else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 22,
+                userInfo: [NSLocalizedDescriptionKey: "Unable to derive backup decryption key."]
+            )
+        }
+
+        let db = CKContainer.default().privateCloudDatabase
+        let recordID = CKRecord.ID(recordName: cloudRecordName)
+        let record = try await db.record(for: recordID)
+        guard let blob = record["blob"] as? Data else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 23,
+                userInfo: [NSLocalizedDescriptionKey: "iCloud backup blob is missing."]
+            )
+        }
+
+        let box = try ChaChaPoly.SealedBox(combined: blob)
+        let plain = try ChaChaPoly.open(box, using: key)
+        let decoded = try JSONDecoder().decode(BackupEnvelope.self, from: plain)
+
+        let currentFingerprint = derivedSeedMaterial()?.sha256Fingerprint().lowercased()
+        guard currentFingerprint == decoded.identityMetadata.phraseFingerprint.lowercased() else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 24,
+                userInfo: [NSLocalizedDescriptionKey: "Backup identity does not match this seed phrase."]
+            )
+        }
+
+        let defaults = UserDefaults.standard
+        defaults.set(decoded.preferences.safeModeEnabled, forKey: "semay.safe_mode_enabled")
+        defaults.set(decoded.preferences.readReceiptsEnabled, forKey: "semay.read_receipts_enabled")
+        defaults.set(decoded.preferences.presenceEnabled, forKey: "semay.presence_enabled")
+        defaults.set(decoded.preferences.advancedSettingsEnabled, forKey: "semay.settings.advanced")
+        if decoded.identityMetadata.backupCompleted {
+            completeBackup()
+        }
+
+        return true
+    }
+    #endif
+
+    private func cloudEncryptionKey() -> SymmetricKey? {
+        guard let seed = derivedSeedMaterial() else { return nil }
+        var material = Data("semay.cloud.backup.v1".utf8)
+        material.append(seed)
+        let digest = SHA256.hash(data: material)
+        return SymmetricKey(data: Data(digest))
     }
 
     private static func randomEntropy(byteCount: Int) -> Data {
