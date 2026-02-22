@@ -2027,15 +2027,15 @@ private struct SemayMapTabView: View {
 
     private func preferredFeaturedCountryPack() -> HubTilePack? {
         guard countryPacksEnabled, !featuredCountryPacks.isEmpty else { return nil }
-        if let featured = featuredCountryPacks.first(where: { $0.isFeatured ?? false }) {
-            return featured
-        }
         if let eritrea = featuredCountryPacks.first(where: {
             (($0.countryCode ?? "").lowercased() == "er")
                 || (($0.regionCode ?? "").lowercased() == "er")
                 || $0.name.lowercased().contains("eritrea")
         }) {
             return eritrea
+        }
+        if let featured = featuredCountryPacks.first(where: { $0.isFeatured ?? false }) {
+            return featured
         }
         return featuredCountryPacks.first
     }
