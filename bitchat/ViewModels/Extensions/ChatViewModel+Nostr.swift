@@ -715,7 +715,9 @@ extension ChatViewModel {
         }
         
         // Same for READ receipt if viewing
-        if !wasReadBefore && selectedPrivateChatPeer == message.senderPeerID {
+        if !wasReadBefore &&
+            selectedPrivateChatPeer == message.senderPeerID &&
+            UserDefaults.standard.bool(forKey: "semay.read_receipts_enabled") {
              if let _ = key {
                  if let id = try? idBridge.getCurrentNostrIdentity() {
                      let nt = NostrTransport(keychain: keychain, idBridge: idBridge)

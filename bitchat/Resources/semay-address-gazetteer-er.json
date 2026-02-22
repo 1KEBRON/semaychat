@@ -1,0 +1,8 @@
+[
+  {"locality":"Asmara","adminArea":"Maekel","countryCode":"ER","latitude":15.3229,"longitude":38.9251},
+  {"locality":"Keren","adminArea":"Anseba","countryCode":"ER","latitude":15.7779,"longitude":38.4511},
+  {"locality":"Massawa","adminArea":"Northern Red Sea","countryCode":"ER","latitude":15.6079,"longitude":39.4745},
+  {"locality":"Mendefera","adminArea":"Debub","countryCode":"ER","latitude":14.8852,"longitude":38.8152},
+  {"locality":"Barentu","adminArea":"Gash-Barka","countryCode":"ER","latitude":15.1058,"longitude":37.5907},
+  {"locality":"Assab","adminArea":"Southern Red Sea","countryCode":"ER","latitude":13.0092,"longitude":42.7394}
+]

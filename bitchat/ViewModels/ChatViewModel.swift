@@ -1748,6 +1748,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     @MainActor
     func markPrivateMessagesAsRead(from peerID: PeerID) {
         privateChatManager.markAsRead(from: peerID)
+        guard UserDefaults.standard.bool(forKey: "semay.read_receipts_enabled") else {
+            return
+        }
         
         // Handle GeoDM (nostr_*) read receipts directly via per-geohash identity
         if peerID.isGeoDM,

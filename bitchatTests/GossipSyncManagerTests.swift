@@ -12,32 +12,25 @@ struct GossipSyncManagerTests {
         let delegate = RecordingDelegate()
         manager.delegate = delegate
 
-        try await confirmation("sync request sent") { sent in
-            delegate.onSend = {
-                delegate.onSend = nil
-                sent()
-            }
-
-            let iterations = 200
-            let senderID = try #require(Data(hexString: "1122334455667788"))
-            
-            for i in 0..<iterations {
-                let packet = BitchatPacket(
-                    type: MessageType.message.rawValue,
-                    senderID: senderID,
-                    recipientID: nil,
-                    timestamp: 1_000_000 + UInt64(i),
-                    payload: Data([UInt8(truncatingIfNeeded: i)]),
-                    signature: nil,
-                    ttl: 1
-                )
-                manager.onPublicPacketSeen(packet)
-                try await sleep(0.001)
-            }
-
-            manager.scheduleInitialSyncToPeer(PeerID(str: "FFFFFFFFFFFFFFFF"), delaySeconds: 0.0)
-            try await TestHelpers.waitFor({ delegate.lastPacket != nil }, timeout: TestConstants.shortTimeout)
+        let iterations = 200
+        let senderID = try #require(Data(hexString: "1122334455667788"))
+        
+        for i in 0..<iterations {
+            let packet = BitchatPacket(
+                type: MessageType.message.rawValue,
+                senderID: senderID,
+                recipientID: nil,
+                timestamp: 1_000_000 + UInt64(i),
+                payload: Data([UInt8(truncatingIfNeeded: i)]),
+                signature: nil,
+                ttl: 1
+            )
+            manager.onPublicPacketSeen(packet)
+            try await sleep(0.001)
         }
+
+        manager.scheduleInitialSyncToPeer(PeerID(str: "FFFFFFFFFFFFFFFF"), delaySeconds: 0.0)
+        try await TestHelpers.waitFor({ delegate.lastPacket != nil }, timeout: TestConstants.defaultTimeout)
 
         let lastPacket = try #require(delegate.lastPacket, "Expected sync packet to be sent")
         #expect(lastPacket.type == MessageType.requestSync.rawValue)

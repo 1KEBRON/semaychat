@@ -46,12 +46,14 @@ struct BitchatApp: App {
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            SemayRootView()
                 .environmentObject(chatViewModel)
                 .onAppear {
                     NotificationDelegate.shared.chatViewModel = chatViewModel
                     // Inject live Noise service into VerificationService to avoid creating new BLE instances
                     VerificationService.shared.configure(with: chatViewModel.meshService.getNoiseService())
+                    // Ensure mnemonic exists before anything derives or caches identity.
+                    _ = SeedPhraseService.shared.getOrCreatePhrase()
                     // Prewarm Nostr identity and QR to make first VERIFY sheet fast
                     let nickname = chatViewModel.nickname
                     DispatchQueue.global(qos: .utility).async {
@@ -66,6 +68,7 @@ struct BitchatApp: App {
                     
                     // Start presence service (will wait for Tor readiness)
                     GeohashPresenceService.shared.start()
+                    SemayEnvelopeSyncService.shared.start()
 
                     // Check for shared content
                     checkForSharedContent()
@@ -87,6 +90,7 @@ struct BitchatApp: App {
                         }
                         // Proactively disconnect Nostr to avoid spurious socket errors while Tor is down
                         NostrRelayManager.shared.disconnect()
+                        SemayEnvelopeSyncService.shared.stop()
                         didEnterBackground = true
                     case .active:
                         // Restart services when becoming active
@@ -113,6 +117,7 @@ struct BitchatApp: App {
                                 }
                             }
                         }
+                        SemayEnvelopeSyncService.shared.start()
                         checkForSharedContent()
                     case .inactive:
                         break
@@ -140,6 +145,12 @@ struct BitchatApp: App {
         if url.scheme == "bitchat" && url.host == "share" {
             // Handle shared content
             checkForSharedContent()
+            return
+        }
+
+        if url.scheme == "semay" {
+            NotificationCenter.default.post(name: .semayDeepLinkURL, object: url)
+            return
         }
     }
     
@@ -278,4 +289,3 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         completionHandler([.banner, .sound])
     }
 }
-

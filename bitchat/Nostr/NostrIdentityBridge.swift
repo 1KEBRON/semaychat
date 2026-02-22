@@ -6,10 +6,16 @@ final class NostrIdentityBridge {
     private let keychainService = "chat.bitchat.nostr"
     private let currentIdentityKey = "nostr-current-identity"
     private let deviceSeedKey = "nostr-device-seed"
+    private let seedPhraseService = "chat.bitchat.seed"
+    private let seedPhraseKey = "mnemonic-v1"
+
+    private let globalDerivationContext = "semay-nostr-global-v1"
     // In-memory cache to avoid transient keychain access issues
     private var deviceSeedCache: Data?
     // Cache derived identities to avoid repeated crypto during view rendering
     private var derivedIdentityCache: [String: NostrIdentity] = [:]
+    private var globalIdentityCache: NostrIdentity?
+    private var globalIdentitySeedFingerprint: String?
     private let cacheLock = NSLock()
 
     private let keychain: KeychainManagerProtocol
@@ -20,6 +26,10 @@ final class NostrIdentityBridge {
     
     /// Get or create the current Nostr identity
     func getCurrentNostrIdentity() throws -> NostrIdentity? {
+        if let seedPhrase = loadSeedPhrase() {
+            return try deriveGlobalIdentity(fromSeedPhrase: seedPhrase)
+        }
+
         // Check if we already have a Nostr identity
         if let existingData = keychain.load(key: currentIdentityKey, service: keychainService),
            let identity = try? JSONDecoder().decode(NostrIdentity.self, from: existingData) {
@@ -34,6 +44,64 @@ final class NostrIdentityBridge {
         keychain.save(key: currentIdentityKey, data: data, service: keychainService, accessible: nil)
         
         return nostrIdentity
+    }
+
+    private func loadSeedPhrase() -> String? {
+        guard let data = keychain.load(key: seedPhraseKey, service: seedPhraseService),
+              let phrase = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        let normalized = phrase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func deriveGlobalIdentity(fromSeedPhrase seedPhrase: String) throws -> NostrIdentity {
+        let seedMaterial = Data(SHA256.hash(data: Data(seedPhrase.utf8)))
+        let seedFingerprint = seedMaterial.sha256Fingerprint()
+
+        cacheLock.lock()
+        if let cached = globalIdentityCache, globalIdentitySeedFingerprint == seedFingerprint {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
+        guard let contextData = globalDerivationContext.data(using: .utf8) else {
+            throw NSError(domain: "NostrIdentity", code: -2, userInfo: [NSLocalizedDescriptionKey: "Invalid derivation context"])
+        }
+
+        let key = SymmetricKey(data: seedMaterial)
+
+        func candidateKey(iteration: UInt32) -> Data {
+            var input = Data(contextData)
+            var iterBE = iteration.bigEndian
+            withUnsafeBytes(of: &iterBE) { bytes in
+                input.append(contentsOf: bytes)
+            }
+            let code = HMAC<SHA256>.authenticationCode(for: input, using: key)
+            return Data(code)
+        }
+
+        for i in 0..<16 {
+            let keyData = candidateKey(iteration: UInt32(i))
+            if let identity = try? NostrIdentity(privateKeyData: keyData) {
+                cacheLock.lock()
+                globalIdentityCache = identity
+                globalIdentitySeedFingerprint = seedFingerprint
+                cacheLock.unlock()
+                return identity
+            }
+        }
+
+        // As a final fallback, hash seedMaterial + context to get deterministic 32-byte material.
+        let fallback = (seedMaterial + contextData).sha256Hash()
+        let identity = try NostrIdentity(privateKeyData: fallback)
+        cacheLock.lock()
+        globalIdentityCache = identity
+        globalIdentitySeedFingerprint = seedFingerprint
+        cacheLock.unlock()
+        return identity
     }
     
     /// Associate a Nostr identity with a Noise public key (for favorites)

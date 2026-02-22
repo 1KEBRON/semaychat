@@ -1,0 +1,103 @@
+{
+  "version": "1.0.0",
+  "dictionary": {
+    "en": {
+      "ti": {
+        "hello": "selam",
+        "hi": "selam",
+        "how are you": "kelem?",
+        "where": "kuay?",
+        "where is": "kuay?",
+        "how much": "zeykrih",
+        "water": "wuha",
+        "coffee": "buna",
+        "thank you": "yekenye dehna",
+        "thanks": "yekenye dehna",
+        "please": "temedem",
+        "road": "qibla",
+        "bus": "masinqo",
+        "bus stop": "bus station",
+        "market": "dill",
+        "food": "qibuhayit",
+        "clinic": "hospitall",
+        "hospital": "hospitall",
+        "pharmacy": "pharmacy",
+        "guide": "guide",
+        "merchant": "mukri",
+        "business": "wot",
+        "yes": "aye",
+        "no": "aydey"
+      },
+      "am": {
+        "hello": "selam",
+        "hi": "selam",
+        "how are you": "dehna neh?",
+        "where": "enjaz?",
+        "where is": "enjaz?",
+        "how much": "shemal?",
+        "water": "wih",
+        "coffee": "buna",
+        "thank you": "amenyasalalehu",
+        "thanks": "amenyasalalehu",
+        "please": "efendih",
+        "road": "marq",
+        "bus": "bus",
+        "bus stop": "bus stop",
+        "market": "debru",
+        "food": "enjera",
+        "clinic": "beteseb",
+        "hospital": "beteseb",
+        "pharmacy": "firfir",
+        "guide": "gedeb",
+        "merchant": "kemist",
+        "business": "meles",
+        "yes": "ewi",
+        "no": "ehun"
+      }
+    },
+    "ti": {
+      "en": {
+        "selam": "hello",
+        "yekenye dehna": "thank you",
+        "selam aleikum": "hello",
+        "buna": "coffee",
+        "wuha": "water",
+        "aye": "yes",
+        "aydey": "no",
+        "kuay": "where",
+        "mesheni": "thank you"
+      },
+      "am": {
+        "selam": "selam",
+        "yekenye dehna": "aseegn",
+        "buna": "buna",
+        "wuha": "wih",
+        "aye": "ewi",
+        "aydey": "ehun",
+        "kuay": "enjaz"
+      }
+    },
+    "am": {
+      "en": {
+        "selam": "hello",
+        "amenyasalalehu": "thank you",
+        "buna": "coffee",
+        "wih": "water",
+        "ewi": "yes",
+        "ehun": "no",
+        "enjaz": "where",
+        "dehna neh": "how are you",
+        "dehna nehn": "how are you"
+      },
+      "ti": {
+        "selam": "selam",
+        "amenyasalalehu": "yekenye dehna",
+        "buna": "buna",
+        "wih": "wuha",
+        "ewi": "aye",
+        "ehun": "aydey",
+        "enjaz": "kuay?"
+      }
+    }
+  }
+}

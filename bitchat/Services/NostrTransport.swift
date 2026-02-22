@@ -21,6 +21,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
     // Reachability Cache (thread-safe)
     private var reachablePeers: Set<PeerID> = []
     private let queue = DispatchQueue(label: "nostr.transport.state", attributes: .concurrent)
+    private let readReceiptsDefaultsKey = "semay.read_receipts_enabled"
 
     @MainActor
     init(keychain: KeychainManagerProtocol, idBridge: NostrIdentityBridge) {
@@ -131,6 +132,10 @@ final class NostrTransport: Transport, @unchecked Sendable {
     }
 
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
+        guard UserDefaults.standard.bool(forKey: readReceiptsDefaultsKey) else {
+            SecureLogger.debug("NostrTransport: read receipts disabled by safe mode", category: .session)
+            return
+        }
         // Enqueue and process with throttling to avoid relay rate limits
         // Use barrier to synchronize access to readQueue
         queue.async(flags: .barrier) { [weak self] in
@@ -184,6 +189,10 @@ extension NostrTransport {
     }
 
     func sendReadReceiptGeohash(_ messageID: String, toRecipientHex recipientHex: String, from identity: NostrIdentity) {
+        guard UserDefaults.standard.bool(forKey: readReceiptsDefaultsKey) else {
+            SecureLogger.debug("GeoDM: read receipts disabled by safe mode", category: .session)
+            return
+        }
         Task { @MainActor in
             SecureLogger.debug("GeoDM: send READ mid=\(messageID.prefix(8))…", category: .session)
             guard let embedded = NostrEmbeddedBitChat.encodeAckForNostrNoRecipient(type: .readReceipt, messageID: messageID, senderPeerID: senderPeerID) else { return }
@@ -247,6 +256,10 @@ extension NostrTransport {
     private func sendReadAckItem(_ item: QueuedRead) {
         Task { @MainActor in
             defer { scheduleNextReadAck() }
+            guard UserDefaults.standard.bool(forKey: readReceiptsDefaultsKey) else {
+                SecureLogger.debug("NostrTransport: dropping queued READ ack while safe mode is active", category: .session)
+                return
+            }
             guard let recipientNpub = resolveRecipientNpub(for: item.peerID),
                   let recipientHex = npubToHex(recipientNpub),
                   let senderIdentity = try? idBridge.getCurrentNostrIdentity() else { return }

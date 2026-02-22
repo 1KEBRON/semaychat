@@ -11,6 +11,9 @@ import BitLogger
 import SwiftUI
 
 extension ChatViewModel {
+    private var semayReadReceiptsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "semay.read_receipts_enabled")
+    }
 
     // MARK: - Private Chat Sending
 
@@ -294,6 +297,7 @@ extension ChatViewModel {
     }
     
     func sendReadReceiptIfNeeded(to messageId: String, senderPubKey: String, from id: NostrIdentity) {
+        guard semayReadReceiptsEnabled else { return }
         guard !sentReadReceipts.contains(messageId) else { return }
         let nt = NostrTransport(keychain: keychain, idBridge: idBridge)
         nt.senderPeerID = meshService.myPeerID
@@ -743,9 +747,11 @@ extension ChatViewModel {
             // Use the incoming peerID directly - it has the established Noise session.
             // Don't use PeerID(hexData: noiseKey) as that creates a 64-hex ID without a session.
             // Use meshService directly (not messageRouter) so it queues if peer disconnects.
-            let receipt = ReadReceipt(originalMessageID: message.id, readerID: meshService.myPeerID, readerNickname: nickname)
-            meshService.sendReadReceipt(receipt, to: peerID)
-            sentReadReceipts.insert(message.id)
+            if semayReadReceiptsEnabled {
+                let receipt = ReadReceipt(originalMessageID: message.id, readerID: meshService.myPeerID, readerNickname: nickname)
+                meshService.sendReadReceipt(receipt, to: peerID)
+                sentReadReceipts.insert(message.id)
+            }
         } else {
             // Notify
             unreadPrivateMessages.insert(peerID)
@@ -808,6 +814,9 @@ extension ChatViewModel {
         if let key,
            let ephemeralPeerID = unifiedPeerService.peers.first(where: { $0.noisePublicKey == key })?.peerID {
             unreadPrivateMessages.remove(ephemeralPeerID)
+        }
+        guard semayReadReceiptsEnabled else {
+            return
         }
         if !sentReadReceipts.contains(message.id) {
             if let key {
