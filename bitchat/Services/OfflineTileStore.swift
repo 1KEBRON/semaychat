@@ -472,6 +472,19 @@ final class OfflineTileStore: ObservableObject {
         return countryPacks.sorted(by: compareCountryCatalogPreference)
     }
 
+    func resolveCountryPack(packID: String, catalog: [HubTilePack]) -> HubTilePack? {
+        guard let target = normalizedToken(packID) else {
+            return nil
+        }
+        let matches = catalog.filter { pack in
+            normalizedToken(pack.packID) == target || normalizedToken(pack.id) == target
+        }
+        guard !matches.isEmpty else {
+            return nil
+        }
+        return matches.sorted(by: compareCountryCatalogPreference).first
+    }
+
     @discardableResult
     func installCountryPack(packID: String) async throws -> OfflineTilePack {
         let trimmedPackID = packID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -484,13 +497,7 @@ final class OfflineTileStore: ObservableObject {
         }
 
         let catalog = try await fetchHubCatalog()
-        guard let selected = catalog.first(where: { pack in
-            let explicit = (pack.packID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if explicit == trimmedPackID {
-                return true
-            }
-            return pack.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == trimmedPackID
-        }) else {
+        guard let selected = resolveCountryPack(packID: trimmedPackID, catalog: catalog) else {
             throw NSError(
                 domain: "OfflineTileStore",
                 code: 62,
