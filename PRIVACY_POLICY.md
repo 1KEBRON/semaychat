@@ -1,6 +1,6 @@
 # bitchat Privacy Policy
 
-*Last updated: January 2025*
+*Last updated: February 2026*
 
 ## Our Commitment
 
@@ -11,6 +11,7 @@ bitchat is designed with privacy as its foundation. We believe private communica
 - **No personal data collection** - We don't collect names, emails, or phone numbers
 - **No servers** - Everything happens on your device and through peer-to-peer connections
 - **No tracking** - We have no analytics, telemetry, or user tracking
+- **Local-first media** - Business evidence photos are stored locally by default
 - **Open source** - You can verify these claims by reading our code
 
 ## What Information bitchat Stores
@@ -37,6 +38,11 @@ bitchat is designed with privacy as its foundation. We believe private communica
    - Public keys of peers you mark as favorites
    - Stored only on your device
    - Allows you to recognize these peers in future sessions
+
+5. **Map and directory data**
+   - Business/service listings and map pins you create are stored locally
+   - Coordinates for listings are stored when you set them manually, or when you explicitly confirm using photo-derived location
+   - In this release, photo sharing over network is metadata-only (no binary image upload by default)
 
 ### Temporary Session Data
 
@@ -66,7 +72,7 @@ When you join a password-protected room:
 
 bitchat **never**:
 - Collects personal information
-- Tracks your location
+- Performs background location tracking
 - Stores data on servers
 - Shares data with third parties
 - Uses analytics or telemetry
@@ -93,9 +99,15 @@ You have complete control:
 
 bitchat requires Bluetooth permission to function:
 - Used only for peer-to-peer communication
-- No location data is accessed or stored
 - Bluetooth is not used for tracking
 - You can revoke this permission at any time in system settings
+
+Location/photos permissions are only used for map and directory features:
+- Camera/photo access lets you attach business evidence photos to listings
+- Photo GPS is read only to offer a suggested pin and only before metadata stripping
+- Exact photo-derived location is applied/shared only if you explicitly confirm
+- Stored photos are compressed and stripped of EXIF metadata after processing
+- Local storage is the default; network sync in this release includes metadata pointers only
 
 ## Children's Privacy
 

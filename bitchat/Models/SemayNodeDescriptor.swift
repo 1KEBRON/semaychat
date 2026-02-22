@@ -10,6 +10,7 @@ struct SemayNodeDescriptor: Decodable, Equatable {
     let baseURL: String
     let signingPubkey: String?
     let signingAlg: String?
+    let mapLibreEnabled: Bool?
 
     enum CodingKeys: String, CodingKey {
         case nodeName = "node_name"
@@ -17,6 +18,6 @@ struct SemayNodeDescriptor: Decodable, Equatable {
         case baseURL = "base_url"
         case signingPubkey = "signing_pubkey"
         case signingAlg = "signing_alg"
+        case mapLibreEnabled = "maplibre_enabled"
     }
 }
-

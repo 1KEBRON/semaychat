@@ -10,13 +10,40 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         case businessRegister = "business.register"
         case businessUpdate = "business.update"
         case bulletinPost = "bulletin.post"
+        case routeCuratedCreate = "route.curated.create"
+        case routeCuratedUpdate = "route.curated.update"
+        case routeCuratedRetract = "route.curated.retract"
+        case routeCuratedReport = "route.curated.report"
+        case routeCuratedEndorse = "route.curated.endorse"
         case routeCurated = "route.curated"
+        case serviceDirectoryCreate = "service.directory.create"
+        case serviceDirectoryUpdate = "service.directory.update"
+        case serviceDirectoryRetract = "service.directory.retract"
+        case serviceDirectoryEndorse = "service.directory.endorse"
+        case serviceDirectoryReport = "service.directory.report"
         case promiseCreate = "promise.create"
         case promiseAccept = "promise.accept"
         case promiseReject = "promise.reject"
         case promiseSettle = "promise.settle"
         case chatMessage = "chat.message"
         case chatAck = "chat.ack"
+
+        static let routeLifecycle: Set<EventType> = [
+            .routeCurated,
+            .routeCuratedCreate,
+            .routeCuratedUpdate,
+            .routeCuratedRetract,
+            .routeCuratedReport,
+            .routeCuratedEndorse,
+        ]
+
+        static let serviceDirectoryLifecycle: Set<EventType> = [
+            .serviceDirectoryCreate,
+            .serviceDirectoryUpdate,
+            .serviceDirectoryRetract,
+            .serviceDirectoryEndorse,
+            .serviceDirectoryReport,
+        ]
     }
 
     enum ValidationCategory: String, Codable {
@@ -29,6 +56,8 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         let category: ValidationCategory
         let reason: String
     }
+
+    static let currentSchemaVersion = "1.0"
 
     let schemaVersion: String
     let eventID: String
@@ -43,6 +72,25 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
     let payload: [String: String]
 
     var id: String { eventID }
+
+    func payloadValue(_ key: String) -> String? {
+        payload[key]
+    }
+
+    func payloadIntValue(_ key: String) -> Int? {
+        Int(payload[key] ?? "")
+    }
+
+    func payloadDoubleValue(_ key: String) -> Double? {
+        Double(payload[key] ?? "")
+    }
+
+    func payloadBoolValue(_ key: String) -> Bool? {
+        guard let raw = payload[key]?.lowercased() else { return nil }
+        if raw == "1" || raw == "true" || raw == "yes" { return true }
+        if raw == "0" || raw == "false" || raw == "no" { return false }
+        return nil
+    }
 
     private struct SigningPayload: Codable {
         let schemaVersion: String
@@ -96,7 +144,7 @@ struct SemayEventEnvelope: Codable, Identifiable, Equatable {
         payloadHash: String? = nil,
         signature: String
     ) {
-        self.schemaVersion = "1.0"
+        self.schemaVersion = Self.currentSchemaVersion
         self.eventID = eventID
         self.eventType = eventType
         self.entityID = entityID

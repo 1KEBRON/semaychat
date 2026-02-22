@@ -18,7 +18,8 @@ let package = Package(
     dependencies:[
         .package(path: "localPackages/Arti"),
         .package(path: "localPackages/BitLogger"),
-        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", exact: "0.21.1")
+        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", exact: "0.21.1"),
+        .package(url: "https://github.com/maplibre/maplibre-gl-native-distribution", exact: "6.23.0")
     ],
     targets: [
         .executableTarget(
@@ -26,7 +27,8 @@ let package = Package(
             dependencies: [
                 .product(name: "P256K", package: "swift-secp256k1"),
                 .product(name: "BitLogger", package: "BitLogger"),
-                .product(name: "Tor", package: "Arti")
+                .product(name: "Tor", package: "Arti"),
+                .product(name: "MapLibre", package: "maplibre-gl-native-distribution")
             ],
             path: "bitchat",
             exclude: [

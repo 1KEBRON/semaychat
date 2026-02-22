@@ -12,6 +12,8 @@ final class SemayNavigationState: ObservableObject {
 
     @Published var selectedPinID: String?
     @Published var selectedBusinessID: String?
+    @Published var selectedRouteID: String?
+    @Published var selectedServiceID: String?
     @Published var pendingFocus: Bool = false
     @Published var pendingCenter: PendingCenter?
     @Published var inboundEnvelope: SemayEventEnvelope?

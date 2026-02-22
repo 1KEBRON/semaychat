@@ -62,6 +62,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+## SQLite lock files
+*.mbtiles-shm
+*.mbtiles-wal
+
 ## Temporary files
 *.tmp
 *.temp

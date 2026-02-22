@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>bitchat</string>
+	<string>Semay Chat</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -43,17 +43,17 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>bitchat uses Bluetooth to create a secure mesh network for chatting with nearby users.</string>
+	<string>Semay uses Bluetooth to create a secure mesh network for chatting with nearby users.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>bitchat uses Bluetooth to discover and connect with other bitchat users nearby.</string>
+	<string>Semay uses Bluetooth to discover and connect with nearby users.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>bitchat uses the camera to scan QR codes to verify peers.</string>
+	<string>Semay uses the camera to scan QR codes to connect securely.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>bitchat lets you pick images from your photo library to share with nearby peers.</string>
+	<string>Semay lets you add photos as local business evidence. Photo location is only used if you explicitly confirm it.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>bitchat uses the microphone to record voice notes that relay across the mesh.</string>
+	<string>Semay uses the microphone to record voice notes that can relay across the mesh.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>bitchat uses your approximate location to compute local geohash channels for optional public chats. Exact GPS is never shared.</string>
+	<string>Semay uses location for nearby maps and local service discovery. Exact location from photos is only used when you explicitly confirm it.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

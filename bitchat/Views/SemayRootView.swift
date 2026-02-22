@@ -4,6 +4,11 @@ import MapKit
 import UIKit
 import SQLite3
 import UniformTypeIdentifiers
+#if canImport(MapLibre)
+import MapLibre
+#endif
+#elseif os(macOS)
+import AppKit
 #endif
 
 private extension View {
@@ -35,14 +40,91 @@ private extension View {
     }
 }
 
+private let offlineTileStoreErrorDomain = OfflineTileStore.errorDomain
+private let signedPackPolicyErrorCode = OfflineTileStore.signedPackPolicyErrorCode
+
+private func isSignedPackPolicyError(_ error: Error) -> Bool {
+    let nsError = error as NSError
+    return nsError.domain == offlineTileStoreErrorDomain && nsError.code == signedPackPolicyErrorCode
+}
+
+private func userFacingOfflineMapError(_ error: Error) -> String {
+    let base = (error as NSError).localizedDescription
+    guard isSignedPackPolicyError(error) else { return base }
+    return "\(base) Install signed packs from a trusted node, or disable \"Require Signed Offline Packs\" in Me > Node (Advanced)."
+}
+
+enum SemayMapSurfaceMode: Equatable {
+    case hidden
+    case onlineOnly
+    case offlineAvailable
+
+    static func resolve(isOnline: Bool, hasUsableOfflinePack: Bool) -> SemayMapSurfaceMode {
+        if hasUsableOfflinePack {
+            return .offlineAvailable
+        }
+        return isOnline ? .onlineOnly : .hidden
+    }
+}
+
+private enum SemayMapSurfacePolicy {
+    private static let centerLatKey = "semay.map.surface.last_center_lat"
+    private static let centerLonKey = "semay.map.surface.last_center_lon"
+    private static let spanLatKey = "semay.map.surface.last_span_lat"
+    private static let spanLonKey = "semay.map.surface.last_span_lon"
+
+    static let regionChangedNotification = Notification.Name("semay.map.surface.region.changed")
+    static let defaultRegion = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 15.3229, longitude: 38.9251),
+        span: MKCoordinateSpan(latitudeDelta: 0.06, longitudeDelta: 0.06)
+    )
+
+    static func mode(isOnline: Bool, hasUsableOfflinePack: Bool) -> SemayMapSurfaceMode {
+        SemayMapSurfaceMode.resolve(isOnline: isOnline, hasUsableOfflinePack: hasUsableOfflinePack)
+    }
+
+    static func loadRegion() -> MKCoordinateRegion {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: centerLatKey) != nil,
+              defaults.object(forKey: centerLonKey) != nil,
+              defaults.object(forKey: spanLatKey) != nil,
+              defaults.object(forKey: spanLonKey) != nil else {
+            return defaultRegion
+        }
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: defaults.double(forKey: centerLatKey),
+                longitude: defaults.double(forKey: centerLonKey)
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: max(0.0001, defaults.double(forKey: spanLatKey)),
+                longitudeDelta: max(0.0001, defaults.double(forKey: spanLonKey))
+            )
+        )
+    }
+
+    static func saveRegion(_ region: MKCoordinateRegion) {
+        let defaults = UserDefaults.standard
+        defaults.set(region.center.latitude, forKey: centerLatKey)
+        defaults.set(region.center.longitude, forKey: centerLonKey)
+        defaults.set(region.span.latitudeDelta, forKey: spanLatKey)
+        defaults.set(region.span.longitudeDelta, forKey: spanLonKey)
+        NotificationCenter.default.post(name: regionChangedNotification, object: nil)
+    }
+}
+
 struct SemayRootView: View {
     @EnvironmentObject var viewModel: ChatViewModel
     @StateObject private var seedService = SeedPhraseService.shared
     @StateObject private var dataStore = SemayDataStore.shared
     @StateObject private var navigation = SemayNavigationState.shared
+    @StateObject private var tileStore = OfflineTileStore.shared
+    @StateObject private var reachability = NetworkReachabilityService.shared
+    @AppStorage("semay.seed.backup.defer_until") private var backupDeferUntilEpoch: Double = 0
 
     @State private var selectedTab: Tab = .map
     @State private var showOnboarding = false
+    @State private var mapSurfaceMode: SemayMapSurfaceMode = .onlineOnly
 
     enum Tab {
         case map
@@ -53,25 +135,27 @@ struct SemayRootView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            SemayMapTabView()
-                .environmentObject(dataStore)
-                .tag(Tab.map)
-                .tabItem {
-                    Label("Map", systemImage: "map")
-                }
+            if mapSurfaceMode != .hidden {
+                SemayMapTabView()
+                    .environmentObject(dataStore)
+                    .tag(Tab.map)
+                    .tabItem {
+                        Label(String(localized: "semay.tab.map", defaultValue: "Map"), systemImage: "map")
+                    }
+            }
 
             ContentView()
                 .environmentObject(viewModel)
                 .tag(Tab.chat)
                 .tabItem {
-                    Label("Chat", systemImage: "message")
+                    Label(String(localized: "semay.tab.chat", defaultValue: "Chat"), systemImage: "message")
                 }
 
             SemayBusinessTabView()
                 .environmentObject(dataStore)
                 .tag(Tab.business)
                 .tabItem {
-                    Label("Business", systemImage: "building.2")
+                    Label(String(localized: "semay.tab.business", defaultValue: "Business"), systemImage: "building.2")
                 }
 
             SemayMeTabView()
@@ -79,12 +163,22 @@ struct SemayRootView: View {
                 .environmentObject(seedService)
                 .tag(Tab.me)
                 .tabItem {
-                    Label("Me", systemImage: "person.crop.circle")
+                    Label(String(localized: "semay.tab.me", defaultValue: "Me"), systemImage: "person.crop.circle")
                 }
         }
         .onAppear {
             dataStore.refreshAll()
-            showOnboarding = seedService.needsOnboarding()
+            showOnboarding = shouldShowBackupOnboarding()
+            refreshMapSurfaceMode()
+        }
+        .onChange(of: reachability.isOnline) { _ in
+            refreshMapSurfaceMode()
+        }
+        .onReceive(tileStore.$packs) { _ in
+            refreshMapSurfaceMode()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: SemayMapSurfacePolicy.regionChangedNotification)) { _ in
+            refreshMapSurfaceMode()
         }
         .onReceive(NotificationCenter.default.publisher(for: .semayDeepLinkURL)) { notification in
             guard let url = notification.object as? URL else { return }
@@ -114,24 +208,30 @@ struct SemayRootView: View {
         switch host {
         case "loc", "plus", "pluscode":
             // Deep link to a plus code location: semay://loc/849VCWC8+R9
+            navigation.selectedRouteID = nil
+            navigation.selectedServiceID = nil
             if let area = OpenLocationCode.decode(first) {
                 navigation.selectedBusinessID = nil
                 navigation.selectedPinID = nil
                 let zoom = max(0.06, max(area.latitudeSpan, area.longitudeSpan) * 50.0)
                 navigation.pendingCenter = .init(latitude: area.centerLatitude, longitude: area.centerLongitude, zoomDelta: zoom)
                 navigation.pendingFocus = true
-                selectedTab = .map
+                selectedTab = preferredMapDestinationTab(fallback: .chat)
             }
         case "business":
             navigation.selectedPinID = nil
+            navigation.selectedRouteID = nil
+            navigation.selectedServiceID = nil
             navigation.selectedBusinessID = first
             navigation.pendingFocus = true
-            selectedTab = .map
+            selectedTab = preferredMapDestinationTab(fallback: .business)
         case "pin", "place":
             navigation.selectedBusinessID = nil
+            navigation.selectedRouteID = nil
+            navigation.selectedServiceID = nil
             navigation.selectedPinID = first
             navigation.pendingFocus = true
-            selectedTab = .map
+            selectedTab = preferredMapDestinationTab(fallback: .business)
         case "promise", "promise-response":
             guard first.count <= 16_384,
                   let data = Base64URL.decode(first),
@@ -144,59 +244,314 @@ struct SemayRootView: View {
             break
         }
     }
+
+    private func shouldShowBackupOnboarding() -> Bool {
+        let now = Date().timeIntervalSince1970
+        return seedService.needsOnboarding() && now >= backupDeferUntilEpoch
+    }
+
+    private func preferredMapDestinationTab(fallback: Tab) -> Tab {
+        mapSurfaceMode == .hidden ? fallback : .map
+    }
+
+    private func refreshMapSurfaceMode() {
+        let region = SemayMapSurfacePolicy.loadRegion()
+        var usable = tileStore.hasUsablePack(for: region)
+        if tileStore.isBundledStarterSelected {
+            usable = false
+        }
+        mapSurfaceMode = SemayMapSurfacePolicy.mode(isOnline: reachability.isOnline, hasUsableOfflinePack: usable)
+        selectedTab = Self.adjustedTabSelection(selectedTab, for: mapSurfaceMode)
+    }
+
+    static func adjustedTabSelection(_ selected: Tab, for mode: SemayMapSurfaceMode) -> Tab {
+        if mode == .hidden, selected == .map {
+            return .chat
+        }
+        return selected
+    }
 }
 
 private struct SeedBackupOnboardingView: View {
+    private enum BackupMethod: String, CaseIterable, Identifiable {
+        case iCloud = "icloud"
+        case manual = "manual"
+
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject private var seedService: SeedPhraseService
     @Binding var isPresented: Bool
+    @AppStorage("semay.icloud_backup_enabled") private var iCloudBackupEnabled = false
+    @AppStorage("semay.seed.backup.defer_until") private var backupDeferUntilEpoch: Double = 0
+    @StateObject private var reachability = NetworkReachabilityService.shared
 
     @State private var phrase: String = ""
     @State private var challenge: SeedPhraseService.BackupChallenge = .init(firstIndex: 2, secondIndex: 9)
+    @State private var selectedMethod: BackupMethod = .iCloud
+    @State private var alsoVerifySeedWhenUsingICloud = false
     @State private var firstWord = ""
     @State private var secondWord = ""
     @State private var error: String?
+    @State private var isSubmitting = false
+
+    private let backupReminderDelaySeconds: TimeInterval = 24 * 60 * 60
+
+    private var iCloudBackupAvailable: Bool {
+        seedService.isICloudBackupAvailable()
+    }
+
+    private var phraseWords: [String] {
+        phrase
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+    }
+
+    private var numberedPhrase: String {
+        guard !phraseWords.isEmpty else { return phrase }
+        return phraseWords.enumerated()
+            .map { index, word in "\(index + 1). \(word)" }
+            .joined(separator: "\n")
+    }
+
+    private var normalizedFirstWord: String {
+        firstWord.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var normalizedSecondWord: String {
+        secondWord.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var continueDisabled: Bool {
+        if isSubmitting { return true }
+        switch selectedMethod {
+        case .iCloud:
+            if !iCloudBackupAvailable {
+                return true
+            }
+            if !reachability.isOnline {
+                return true
+            }
+            if alsoVerifySeedWhenUsingICloud {
+                return normalizedFirstWord.isEmpty || normalizedSecondWord.isEmpty
+            }
+            return false
+        case .manual:
+            return normalizedFirstWord.isEmpty || normalizedSecondWord.isEmpty
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Start Using Semay") {
-                    Text("Write down your 12-word seed. This is your account forever.")
-                    Text(phrase)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
+                Section(String(localized: "semay.onboarding.start_using", defaultValue: "Start Using Semay")) {
+                    Text(String(
+                        localized: "semay.onboarding.choose_backup",
+                        defaultValue: "Choose a primary backup path. You can still write down and verify the seed even when using iCloud backup."
+                    ))
                 }
 
-                Section("Backup Check") {
-                    TextField("Word #\(challenge.firstIndex)", text: $firstWord)
-                        .semayDisableAutoCaps()
-                        .semayDisableAutocorrection()
-                    TextField("Word #\(challenge.secondIndex)", text: $secondWord)
-                        .semayDisableAutoCaps()
-                        .semayDisableAutocorrection()
+                Section(String(localized: "semay.onboarding.backup_method", defaultValue: "Backup Method")) {
+                    Picker(String(localized: "semay.onboarding.method", defaultValue: "Method"), selection: $selectedMethod) {
+                        Text(String(localized: "semay.onboarding.method.icloud", defaultValue: "iCloud")).tag(BackupMethod.iCloud)
+                        Text(String(localized: "semay.onboarding.method.write_down", defaultValue: "Write It Down")).tag(BackupMethod.manual)
+                    }
+                    .pickerStyle(.segmented)
+                }
 
-                    if let error {
+                if selectedMethod == .iCloud && iCloudBackupAvailable {
+                    Section(String(localized: "semay.onboarding.icloud_backup", defaultValue: "iCloud Backup")) {
+                        Text(String(
+                            localized: "semay.onboarding.icloud_backup.description",
+                            defaultValue: "Encrypted backup is saved to your iCloud private storage. Plaintext seed words are not uploaded."
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !reachability.isOnline {
+                            Text(String(
+                                localized: "semay.onboarding.no_internet_switch_manual",
+                                defaultValue: "No internet connection. Switch to \"Write It Down\" to continue offline."
+                            ))
+                                .foregroundStyle(.orange)
+                        }
+
+                        Toggle(String(
+                            localized: "semay.onboarding.also_verify_seed",
+                            defaultValue: "Also write down and verify seed now"
+                        ), isOn: $alsoVerifySeedWhenUsingICloud)
+                    }
+
+                    if alsoVerifySeedWhenUsingICloud {
+                        manualBackupSections
+                    }
+                } else {
+                    manualBackupSections
+                }
+
+                if !iCloudBackupAvailable {
+                    Section {
+                        Text(String(
+                            localized: "semay.onboarding.icloud_unavailable_write_down",
+                            defaultValue: "iCloud backup is unavailable for this build. Use \"Write It Down\" for now."
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                Section {
+                    Button(isSubmitting ? "Working..." : continueButtonTitle) {
+                        continueOnboarding()
+                    }
+                    .disabled(continueDisabled)
+
+                    Button(String(
+                        localized: "semay.onboarding.skip_remind_tomorrow",
+                        defaultValue: "Skip for now (remind me tomorrow)"
+                    )) {
+                        backupDeferUntilEpoch = Date().addingTimeInterval(backupReminderDelaySeconds).timeIntervalSince1970
+                        isPresented = false
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                if let error, !error.isEmpty {
+                    Section {
                         Text(error)
                             .foregroundStyle(.red)
                     }
                 }
             }
-            .navigationTitle("Secure Backup")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Continue") {
-                        guard seedService.verifyChallenge(challenge, firstWord: firstWord, secondWord: secondWord) else {
-                            error = "Words do not match. Please check and try again."
-                            return
-                        }
-
-                        seedService.completeBackup()
-                        isPresented = false
-                    }
-                }
-            }
+            .navigationTitle(String(localized: "semay.onboarding.secure_backup", defaultValue: "Secure Backup"))
             .onAppear {
                 phrase = seedService.getOrCreatePhrase()
                 challenge = seedService.createChallenge()
+                if !iCloudBackupAvailable || !reachability.isOnline {
+                    selectedMethod = .manual
+                }
+            }
+            .onChange(of: selectedMethod) { _ in
+                error = nil
+                if selectedMethod == .iCloud, !iCloudBackupAvailable {
+                    selectedMethod = .manual
+                    error = String(
+                        localized: "semay.onboarding.icloud_unavailable_write_down_short",
+                        defaultValue: "iCloud backup is unavailable for this build. Use \"Write It Down\"."
+                    )
+                }
+            }
+        }
+    }
+
+    private var continueButtonTitle: String {
+        switch selectedMethod {
+        case .iCloud:
+            return String(
+                localized: "semay.onboarding.backup_to_icloud_continue",
+                defaultValue: "Back Up to iCloud and Continue"
+            )
+        case .manual:
+            return String(localized: "semay.common.continue", defaultValue: "Continue")
+        }
+    }
+
+    private func continueOnboarding() {
+        error = nil
+
+        switch selectedMethod {
+        case .iCloud:
+            continueWithICloudBackup()
+        case .manual:
+            continueWithManualBackup()
+        }
+    }
+
+    private func continueWithManualBackup() {
+        guard seedService.verifyChallenge(challenge, firstWord: firstWord, secondWord: secondWord) else {
+            error = "Backup check failed. Confirm the exact words for #\(challenge.firstIndex) and #\(challenge.secondIndex)."
+            return
+        }
+
+        seedService.completeBackup()
+        isPresented = false
+    }
+
+    private func continueWithICloudBackup() {
+        guard iCloudBackupAvailable else {
+            error = "iCloud backup is unavailable for this build. Use \"Write It Down\"."
+            selectedMethod = .manual
+            return
+        }
+
+        guard reachability.isOnline else {
+            error = "iCloud backup needs an internet connection. Switch to \"Write It Down\" to continue offline."
+            return
+        }
+
+        if alsoVerifySeedWhenUsingICloud {
+            guard seedService.verifyChallenge(challenge, firstWord: firstWord, secondWord: secondWord) else {
+                error = "Backup check failed. Confirm the exact words for #\(challenge.firstIndex) and #\(challenge.secondIndex)."
+                return
+            }
+        }
+
+        isSubmitting = true
+        Task { @MainActor in
+            defer { isSubmitting = false }
+            #if canImport(CloudKit)
+            do {
+                try await seedService.uploadEncryptedBackupToICloud()
+                iCloudBackupEnabled = true
+                seedService.completeBackup()
+                isPresented = false
+            } catch let uploadError {
+                error = uploadError.localizedDescription
+            }
+            #else
+            error = "iCloud backup is unavailable on this platform."
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var manualBackupSections: some View {
+        Section(String(localized: "semay.onboarding.write_down_seed", defaultValue: "Write Down Seed")) {
+            Text(String(
+                localized: "semay.onboarding.write_seed_instructions",
+                defaultValue: "Write down your 12-word seed exactly as shown. This is your account recovery key."
+            ))
+            Text(numberedPhrase)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+        }
+
+        Section(String(localized: "semay.onboarding.backup_check", defaultValue: "Backup Check")) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Word #\(challenge.firstIndex)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Enter word #\(challenge.firstIndex)", text: $firstWord)
+                    .semayDisableAutoCaps()
+                    .semayDisableAutocorrection()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Word #\(challenge.secondIndex)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Enter word #\(challenge.secondIndex)", text: $secondWord)
+                    .semayDisableAutoCaps()
+                    .semayDisableAutocorrection()
+            }
+
+            Button(String(
+                localized: "semay.onboarding.pick_different_check_words",
+                defaultValue: "Pick Different Check Words"
+            )) {
+                challenge = seedService.createChallenge()
+                firstWord = ""
+                secondWord = ""
+                error = nil
             }
         }
     }
@@ -207,14 +562,16 @@ private struct SemayMapTabView: View {
     @Environment(\.openURL) private var openURL
     @StateObject private var tileStore = OfflineTileStore.shared
     @StateObject private var libraryStore = LibraryPackStore.shared
+    @StateObject private var mapEngine = MapEngineCoordinator.shared
     @StateObject private var reachability = NetworkReachabilityService.shared
     @StateObject private var locationState = LocationStateManager.shared
     @ObservedObject private var navigation = SemayNavigationState.shared
     @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
+    @AppStorage("semay.map.country_packs.enabled") private var countryPacksEnabled = false
 
     @State private var region = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 15.3229, longitude: 38.9251),
-        span: MKCoordinateSpan(latitudeDelta: 2.6, longitudeDelta: 2.6)
+        span: MKCoordinateSpan(latitudeDelta: 0.06, longitudeDelta: 0.06)
     )
     @State private var showAddPin = false
     @State private var editingPin: SemayMapPin?
@@ -231,368 +588,144 @@ private struct SemayMapTabView: View {
     @State private var installingCommunityPack = false
     @AppStorage("semay.map.dismissedOfflineMapBanner") private var dismissedOfflineMapBanner = false
     @State private var showQRScanner = false
+    @State private var mapViewportInitialized = false
+    @State private var communityPackDownloadAvailable = false
+    @State private var hubCatalogReachable = false
+    @State private var featuredCountryPacks: [HubTilePack] = []
+
+    private struct SafetyResource: Identifiable {
+        let id: String
+        let title: String
+        let details: String
+        let phone: String?
+    }
+
+    private var safetyResources: [SafetyResource] {
+        var entries: [SafetyResource] = []
+        let safetyKeywords = ["hospital", "clinic", "ambulance", "police", "embassy", "consulate", "legal", "safe"]
+        for service in dataStore.activeDirectoryServices where service.status == "active" {
+            let category = "\(service.serviceType) \(service.category)".lowercased()
+            let isMatch = safetyKeywords.contains { keyword in
+                category.contains(keyword)
+            }
+            if !isMatch { continue }
+
+            let phone = if !service.phone.isEmpty {
+                service.phone
+            } else if !service.emergencyContact.isEmpty {
+                service.emergencyContact
+            } else {
+                ""
+            }
+            entries.append(
+                SafetyResource(
+                    id: "\(service.name)-\(service.serviceType)-\(service.city)-\(service.country)".lowercased(),
+                    title: service.name,
+                    details: "\(service.city), \(service.country) • \(service.serviceType)",
+                    phone: phone.isEmpty ? nil : phone
+                )
+            )
+        }
+
+        if entries.isEmpty {
+            entries = [
+                SafetyResource(
+                    id: "safety-checklist",
+                    title: "Safety checklist",
+                    details: "Stay with trusted contacts and share your location before moving through checkpoints.",
+                    phone: nil
+                ),
+                SafetyResource(
+                    id: "local-crisis-support",
+                    title: "Local crisis support",
+                    details: "Use verified diaspora channels and keep sensitive details off public bulletin streams.",
+                    phone: nil
+                ),
+                SafetyResource(
+                    id: "emergency-services",
+                    title: "Emergency services",
+                    details: "Use country official emergency numbers from local maps or physical signs when available.",
+                    phone: nil
+                )
+            ]
+        }
+
+        return entries
+    }
 
     var body: some View {
-        NavigationStack {
-            ZStack(alignment: .bottom) {
-                #if os(iOS)
-                SemayMapView(
-                    region: $region,
-                    pins: dataStore.pins,
-                    selectedPinID: Binding(
-                        get: { navigation.selectedPinID },
-                        set: { navigation.selectedPinID = $0 }
-                    ),
-                    businesses: dataStore.businesses,
-                    selectedBusinessID: Binding(
-                        get: { navigation.selectedBusinessID },
-                        set: { navigation.selectedBusinessID = $0 }
-                    ),
-                    useOSMBaseMap: $useOSMBaseMap,
-                    offlinePack: tileStore.availablePack,
-                    useOfflineTiles: $useOfflineTiles,
-                    onLongPress: { coordinate in
-                        editingPin = nil
-                        pinEditorCoordinate = coordinate
-                        showAddPin = true
-                    }
-                )
-                .ignoresSafeArea(edges: .bottom)
-                #else
-                Map(coordinateRegion: $region, annotationItems: dataStore.pins) { pin in
-                    MapAnnotation(coordinate: CLLocationCoordinate2D(latitude: pin.latitude, longitude: pin.longitude)) {
-                        Button {
-                            navigation.selectedPinID = pin.pinID
-                        } label: {
-                            VStack(spacing: 4) {
-                                Image(systemName: pin.isVisible ? "mappin.circle.fill" : "mappin.slash.circle.fill")
-                                    .font(.title2)
-                                    .foregroundStyle(pin.isVisible ? .green : .orange)
-                                Text(pin.name)
-                                    .font(.caption2)
-                                    .lineLimit(1)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(.thinMaterial)
-                                    .clipShape(Capsule())
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .ignoresSafeArea(edges: .bottom)
-                #endif
+        mapRootBody
+    }
 
-                #if os(iOS)
-                if useOfflineTiles, let pack = tileStore.availablePack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Offline map: \(pack.name)")
-                            .font(.caption2)
-                        Text(pack.attribution)
-                            .font(.caption2)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(.leading, 12)
-                    .padding(.top, 10)
-                } else if useOSMBaseMap {
-                    Text("© OpenStreetMap contributors")
-                        .font(.caption2)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(.leading, 12)
-                        .padding(.top, 10)
-                }
+    private var mapRootBody: some View {
+        mapRootShell(with: AnyView(mapRootContent))
+    }
 
-                let starterInstalled = tileStore.isBundledStarterSelected
-                let needsInstall = tileStore.availablePack == nil
-                let showOfflineMapBanner = !dismissedOfflineMapBanner && (needsInstall || (starterInstalled && reachability.isOnline))
-                if showOfflineMapBanner {
-                    let canInstallNow = needsInstall
-                        ? (reachability.isOnline || tileStore.canInstallBundledStarterPack)
-                        : reachability.isOnline
-                    HStack(spacing: 10) {
-                        Image(systemName: reachability.isOnline ? "map" : "wifi.slash")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(starterInstalled ? "Offline maps: starter installed" : "Offline maps not installed")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                            Text(reachability.isOnline
-                                 ? (starterInstalled
-                                    ? (reachability.isExpensive ? "Download full offline maps (Wi-Fi recommended)." : "Download full offline maps.")
-                                    : "Install once so Semay stays useful when the internet is down.")
-                                 : "Starter map is available now. Upgrade later when online.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button(installingCommunityPack ? "Installing..." : (starterInstalled ? "Upgrade" : "Install")) {
-                            Task {
-                                await installCommunityPack()
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!canInstallNow || installingCommunityPack)
+    @ViewBuilder
+    private var mapRootContent: some View {
+        ZStack(alignment: .bottom) {
+            mapBaseLayer
+            mapOverlayPanel
+        }
+    }
 
-                        Button("Continue") {
-                            dismissedOfflineMapBanner = true
-                        }
-                        .buttonStyle(.bordered)
-
-                        if advancedSettingsEnabled, !reachability.isOnline {
-                            Button("Import") {
-                                showTileImporter = true
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 10)
-                }
-                #endif
-
-                VStack {
-                    HStack {
-                        Button {
-                            showExplore = true
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "magnifyingglass")
-                                Text("Search places, businesses, bulletins, plus codes")
-                                    .lineLimit(1)
-                                Spacer()
-                            }
-                            .font(.callout)
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(.ultraThinMaterial, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.top, showOfflineMapBanner ? 74 : 12)
-
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-
-                if let selected = selectedBusiness {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(selected.name).font(.headline)
-                            Spacer()
-                            Text("Business")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("\(selected.category) • \(selected.eAddress)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if !selected.plusCode.isEmpty {
-                            Text(selected.plusCode)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("Updated \(Date(timeIntervalSince1970: TimeInterval(selected.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(selected.details)
-                            .font(.subheadline)
-                            .lineLimit(2)
-                        if !selected.lightningLink.isEmpty || !selected.cashuLink.isEmpty {
-                            HStack(spacing: 10) {
-                                if !selected.lightningLink.isEmpty {
-                                    PaymentChipView(paymentType: .lightning(selected.lightningLink))
-                                }
-                                if !selected.cashuLink.isEmpty {
-                                    PaymentChipView(paymentType: .cashu(selected.cashuLink))
-                                }
-                            }
-                        }
-                        HStack {
-                            if let telURL = telURL(for: selected.phone) {
-                                Button("Call") {
-                                    openURL(telURL)
-                                }
-                                .buttonStyle(.borderedProminent)
-                            }
-                            ShareLink(item: businessShareText(selected)) {
-                                Text("Share")
-                            }
-                            .buttonStyle(.bordered)
-                            Button("Promise Pay") {
-                                promisePayBusiness = selected
-                            }
-                            .buttonStyle(.bordered)
-                            Button("Directions") {
-                                openDirections(latitude: selected.latitude, longitude: selected.longitude, name: selected.name)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(selected.latitude == 0 && selected.longitude == 0)
-                            if dataStore.currentUserPubkey() == selected.ownerPubkey.lowercased() {
-                                Button("Update") {
-                                    editingBusiness = selected
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                            Spacer()
-                            Button("Close") {
-                                navigation.selectedBusinessID = nil
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(12)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                    .padding()
-                } else if let selected = selectedPin {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(selected.name).font(.headline)
-                            Spacer()
-                            Text(selected.isVisible ? "Visible" : "Pending")
-                                .font(.caption)
-                                .foregroundStyle(selected.isVisible ? .green : .orange)
-                        }
-                        Text("\(selected.type) • \(selected.eAddress)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if !selected.plusCode.isEmpty {
-                            Text(selected.plusCode)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("Approvals: \(selected.approvalCount) • Updated \(Date(timeIntervalSince1970: TimeInterval(selected.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(selected.details)
-                            .font(.subheadline)
-                            .lineLimit(2)
-                        HStack {
-                            Button("I'm Here / Approve") {
-                                approvePin(selected)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            ShareLink(item: placeShareText(selected)) {
-                                Text("Share")
-                            }
-                            .buttonStyle(.bordered)
-                            if let telURL = telURL(for: selected.phone) {
-                                Button("Call") {
-                                    openURL(telURL)
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                            Button("Directions") {
-                                openDirections(latitude: selected.latitude, longitude: selected.longitude, name: selected.name)
-                            }
-                            .buttonStyle(.bordered)
-                            Button("Update") {
-                                editingPin = selected
-                                pinEditorCoordinate = nil
-                                showAddPin = true
-                            }
-                            .buttonStyle(.bordered)
-                            Spacer()
-                            Button("Close") {
-                                navigation.selectedPinID = nil
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(12)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                    .padding()
-                } else {
-                    Text("Tap a pin to view details. Use + to add places.")
-                        .font(.caption)
-                        .padding(10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding()
-                }
+    private func mapRootShell(with content: AnyView) -> AnyView {
+        let base = AnyView(
+            NavigationStack {
+                content
             }
             .navigationTitle("Map")
-            .toolbar {
-                #if os(iOS)
-                ToolbarItem(placement: .topBarLeading) {
-                    Menu("Jump") {
-                        Button("Asmara") {
-                            centerMap(latitude: 15.3229, longitude: 38.9251, zoomDelta: 0.18)
-                        }
-                        Button("Addis Ababa") {
-                            centerMap(latitude: 8.9806, longitude: 38.7578, zoomDelta: 0.18)
-                        }
-                        Button("Fit All Pins") {
-                            fitMapToPins()
-                        }
-                    }
-                }
-                #else
-                ToolbarItem(placement: .navigation) {
-                    Menu("Jump") {
-                        Button("Asmara") {
-                            centerMap(latitude: 15.3229, longitude: 38.9251, zoomDelta: 0.18)
-                        }
-                        Button("Addis Ababa") {
-                            centerMap(latitude: 8.9806, longitude: 38.7578, zoomDelta: 0.18)
-                        }
-                        Button("Fit All Pins") {
-                            fitMapToPins()
-                        }
-                    }
-                }
-                #endif
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        editingPin = nil
-                        pinEditorCoordinate = region.center
-                        showAddPin = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                }
-                #if os(iOS)
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showQRScanner = true
-                    } label: {
-                        Image(systemName: "qrcode.viewfinder")
-                    }
-                }
-                #endif
+            .toolbar(content: { mapToolbar })
+        )
+        let presented = mapRootPresentations(for: base)
+        let lifecycleBound = mapRootLifecycleBindings(for: presented)
+        let systemBound = mapRootSystemBindings(for: lifecycleBound)
+        return mapRootNavigationBindings(for: systemBound)
+    }
+
+    private func mapRootPresentations(for shell: AnyView) -> AnyView {
+        var view = shell
+
+        view = AnyView(
+            view.sheet(isPresented: $showAddPin) {
+                AddPinSheet(
+                    isPresented: $showAddPin,
+                    existingPin: editingPin,
+                    initialCoordinate: pinEditorCoordinate
+                )
+                .environmentObject(dataStore)
             }
-            .sheet(isPresented: $showAddPin) {
-                    AddPinSheet(isPresented: $showAddPin, existingPin: editingPin, initialCoordinate: pinEditorCoordinate)
-                        .environmentObject(dataStore)
-            }
-            .sheet(item: $editingBusiness) { business in
+        )
+
+        view = AnyView(
+            view.sheet(item: $editingBusiness) { business in
                 BusinessEditorSheet(existingBusiness: business)
                     .environmentObject(dataStore)
             }
-            .sheet(item: $promisePayBusiness) { business in
+        )
+
+        view = AnyView(
+            view.sheet(item: $promisePayBusiness) { business in
                 SemayPromiseCreateSheet(business: business)
                     .environmentObject(dataStore)
             }
-            #if os(iOS)
-            .sheet(isPresented: $showQRScanner) {
+        )
+#if os(iOS)
+        view = AnyView(
+            view.sheet(isPresented: $showQRScanner) {
                 SemayQRScanSheet(isPresented: $showQRScanner)
             }
-            #endif
-            .sheet(isPresented: $showExplore) {
+        )
+#endif
+        view = AnyView(
+            view.sheet(isPresented: $showExplore) {
                 SemayExploreSheet(
                     isPresented: $showExplore,
                     region: $region,
                     pins: dataStore.pins,
                     businesses: dataStore.businesses,
+                    routes: dataStore.activeCuratedRoutes,
+                    services: dataStore.activeDirectoryServices,
                     bulletins: dataStore.visibleBulletins(),
                     libraryStore: libraryStore,
                     selectedPinID: Binding(
@@ -602,19 +735,54 @@ private struct SemayMapTabView: View {
                     selectedBusinessID: Binding(
                         get: { navigation.selectedBusinessID },
                         set: { navigation.selectedBusinessID = $0 }
+                    ),
+                    selectedRouteID: Binding(
+                        get: { navigation.selectedRouteID },
+                        set: { navigation.selectedRouteID = $0 }
+                    ),
+                    selectedServiceID: Binding(
+                        get: { navigation.selectedServiceID },
+                        set: { navigation.selectedServiceID = $0 }
                     )
                 )
             }
-            .onAppear {
+        )
+
+        return view
+    }
+
+    private func mapRootLifecycleBindings(for shell: AnyView) -> AnyView {
+        var view = shell
+        view = AnyView(
+            view.onAppear {
                 tileStore.refresh()
-                // Default UX: use native MapKit when online; fall back to offline tiles when offline.
                 updateBaseLayerForConnectivity()
-                fitMapToPins()
+                Task {
+                    await refreshCommunityPackAvailability()
+                }
+                if !mapViewportInitialized {
+                    initializeMapViewport()
+                    mapViewportInitialized = true
+                }
+                SemayMapSurfacePolicy.saveRegion(region)
             }
-            .onChange(of: reachability.isOnline) { _ in
+        )
+        view = AnyView(
+            view.onChange(of: reachability.isOnline) { _ in
                 updateBaseLayerForConnectivity()
+                Task {
+                    await refreshCommunityPackAvailability()
+                }
             }
-            .alert("Semay", isPresented: Binding(
+        )
+        return view
+    }
+
+    private func mapRootSystemBindings(for shell: AnyView) -> AnyView {
+        var view = shell
+
+        view = AnyView(
+            view.alert("Semay", isPresented: Binding(
                 get: { mapActionMessage != nil },
                 set: { if !$0 { mapActionMessage = nil } }
             )) {
@@ -624,8 +792,10 @@ private struct SemayMapTabView: View {
                     Text(mapActionMessage)
                 }
             }
-            #if os(iOS)
-            .fileImporter(
+        )
+#if os(iOS)
+        view = AnyView(
+            view.fileImporter(
                 isPresented: $showTileImporter,
                 allowedContentTypes: [UTType(filenameExtension: "mbtiles") ?? .item],
                 allowsMultipleSelection: false
@@ -641,13 +811,16 @@ private struct SemayMapTabView: View {
                         useOSMBaseMap = false
                         tileImportMessage = "Imported offline tiles: \(pack.name)"
                     } catch {
-                        tileImportMessage = "Failed to import tiles: \(error.localizedDescription)"
+                        tileImportMessage = "Failed to import tiles: \(userFacingOfflineMapError(error))"
                     }
                 case .failure(let error):
-                    tileImportMessage = "Failed to import tiles: \(error.localizedDescription)"
+                    tileImportMessage = "Failed to import tiles: \(userFacingOfflineMapError(error))"
                 }
             }
-            .alert("Offline Map", isPresented: Binding(
+        )
+
+        view = AnyView(
+            view.alert("Offline Map", isPresented: Binding(
                 get: { tileImportMessage != nil },
                 set: { if !$0 { tileImportMessage = nil } }
             )) {
@@ -657,60 +830,824 @@ private struct SemayMapTabView: View {
                     Text(tileImportMessage)
                 }
             }
-            #endif
-            .onChange(of: useOfflineTiles) { newValue in
-                if newValue {
-                    useOSMBaseMap = false
-                }
+        )
+#endif
+        view = AnyView(view.onChange(of: useOfflineTiles) { newValue in
+            if newValue {
+                useOSMBaseMap = false
             }
-            .onChange(of: useOSMBaseMap) { newValue in
-                if newValue {
-                    useOfflineTiles = false
-                }
+        })
+        view = AnyView(view.onChange(of: useOSMBaseMap) { newValue in
+            if newValue {
+                useOfflineTiles = false
             }
-            .onChange(of: region.center.latitude) { _ in
-                autoSelectPackIfNeeded()
+        })
+        view = AnyView(view.onChange(of: region.center.latitude) { _ in
+            SemayMapSurfacePolicy.saveRegion(region)
+            autoSelectPackIfNeeded()
+        })
+        view = AnyView(view.onChange(of: region.center.longitude) { _ in
+            SemayMapSurfacePolicy.saveRegion(region)
+            autoSelectPackIfNeeded()
+        })
+        view = AnyView(view.onChange(of: region.span.latitudeDelta) { _ in
+            SemayMapSurfacePolicy.saveRegion(region)
+            autoSelectPackIfNeeded()
+        })
+        view = AnyView(view.onChange(of: region.span.longitudeDelta) { _ in
+            SemayMapSurfacePolicy.saveRegion(region)
+            autoSelectPackIfNeeded()
+        })
+        view = AnyView(view.onChange(of: dataStore.pins.count) { _ in
+            if !navigation.pendingFocus {
+                fitMapToPins()
             }
-            .onChange(of: region.center.longitude) { _ in
-                autoSelectPackIfNeeded()
-            }
-            .onChange(of: dataStore.pins.count) { _ in
-                if !navigation.pendingFocus {
-                    fitMapToPins()
-                }
-            }
-            .onChange(of: navigation.selectedBusinessID) { _ in
-                guard navigation.pendingFocus else { return }
-                guard let id = navigation.selectedBusinessID else { return }
-                if let b = dataStore.businesses.first(where: { $0.businessID == id }) {
-                    centerMap(latitude: b.latitude, longitude: b.longitude, zoomDelta: 0.12)
-                    navigation.pendingFocus = false
-                }
-            }
-            .onChange(of: navigation.selectedPinID) { _ in
-                guard navigation.pendingFocus else { return }
-                guard let id = navigation.selectedPinID else { return }
-                if let pin = dataStore.pins.first(where: { $0.pinID == id }) {
-                    centerMap(latitude: pin.latitude, longitude: pin.longitude, zoomDelta: 0.12)
-                    navigation.pendingFocus = false
-                }
-            }
-            .onChange(of: navigation.pendingCenter) { _ in
-                guard navigation.pendingFocus else { return }
-                guard let pending = navigation.pendingCenter else { return }
-                centerMap(latitude: pending.latitude, longitude: pending.longitude, zoomDelta: pending.zoomDelta)
-                navigation.pendingCenter = nil
+        })
+        return view
+    }
+
+    private func mapRootNavigationBindings(for shell: AnyView) -> AnyView {
+        var view = shell
+        view = AnyView(view.onChange(of: navigation.selectedBusinessID) { _ in
+            guard navigation.pendingFocus else { return }
+            guard let id = navigation.selectedBusinessID else { return }
+            if let b = dataStore.businesses.first(where: { $0.businessID == id }) {
+                centerMap(latitude: b.latitude, longitude: b.longitude, zoomDelta: 0.12)
                 navigation.pendingFocus = false
             }
-            .onChange(of: dataStore.businesses.count) { _ in
-                guard navigation.pendingFocus else { return }
-                if let id = navigation.selectedBusinessID,
-                   let b = dataStore.businesses.first(where: { $0.businessID == id }) {
-                    centerMap(latitude: b.latitude, longitude: b.longitude, zoomDelta: 0.12)
-                    navigation.pendingFocus = false
+        })
+        view = AnyView(view.onChange(of: navigation.selectedPinID) { _ in
+            guard navigation.pendingFocus else { return }
+            guard let id = navigation.selectedPinID else { return }
+            if let pin = dataStore.pins.first(where: { $0.pinID == id }) {
+                centerMap(latitude: pin.latitude, longitude: pin.longitude, zoomDelta: 0.12)
+                navigation.pendingFocus = false
+            }
+        })
+        view = AnyView(view.onChange(of: navigation.selectedRouteID) { _ in
+            guard let id = navigation.selectedRouteID,
+                  let route = dataStore.activeCuratedRoutes.first(where: { $0.routeID == id }),
+                  let first = route.waypoints.first else {
+                return
+            }
+            centerMap(latitude: first.latitude, longitude: first.longitude, zoomDelta: 0.08)
+        })
+        view = AnyView(view.onChange(of: navigation.selectedServiceID) { _ in
+            guard let id = navigation.selectedServiceID,
+                  let service = dataStore.activeDirectoryServices.first(where: { $0.serviceID == id }) else {
+                return
+            }
+            if service.latitude != 0 || service.longitude != 0 {
+                centerMap(latitude: service.latitude, longitude: service.longitude, zoomDelta: 0.08)
+            }
+        })
+        view = AnyView(view.onChange(of: navigation.pendingCenter) { _ in
+            guard navigation.pendingFocus else { return }
+            guard let pending = navigation.pendingCenter else { return }
+            centerMap(latitude: pending.latitude, longitude: pending.longitude, zoomDelta: pending.zoomDelta)
+            navigation.pendingCenter = nil
+            navigation.pendingFocus = false
+        })
+        view = AnyView(view.onChange(of: dataStore.businesses.count) { _ in
+            guard navigation.pendingFocus else { return }
+            if let id = navigation.selectedBusinessID,
+               let b = dataStore.businesses.first(where: { $0.businessID == id }) {
+                centerMap(latitude: b.latitude, longitude: b.longitude, zoomDelta: 0.12)
+                navigation.pendingFocus = false
+            }
+        })
+        return view
+    }
+
+    @ViewBuilder
+    private var mapBaseLayer: some View {
+        #if os(iOS)
+        SemayMapCanvas(
+            mapEngine: mapEngine,
+            region: $region,
+            pins: dataStore.pins,
+            selectedPinID: Binding(
+                get: { navigation.selectedPinID },
+                set: { navigation.selectedPinID = $0 }
+            ),
+            businesses: dataStore.businesses,
+            selectedBusinessID: Binding(
+                get: { navigation.selectedBusinessID },
+                set: { navigation.selectedBusinessID = $0 }
+            ),
+            routes: dataStore.activeCuratedRoutes,
+            selectedRouteID: Binding(
+                get: { navigation.selectedRouteID },
+                set: { navigation.selectedRouteID = $0 }
+            ),
+            services: dataStore.activeDirectoryServices,
+            selectedServiceID: Binding(
+                get: { navigation.selectedServiceID },
+                set: { navigation.selectedServiceID = $0 }
+            ),
+            useOSMBaseMap: $useOSMBaseMap,
+            offlinePacks: tileStore.activePackChain,
+            useOfflineTiles: $useOfflineTiles,
+            onLongPress: { coordinate in
+                editingPin = nil
+                pinEditorCoordinate = coordinate
+                showAddPin = true
+            }
+        )
+        .ignoresSafeArea(edges: .bottom)
+        #else
+        Map(coordinateRegion: $region, annotationItems: dataStore.pins) { pin in
+            MapAnnotation(coordinate: CLLocationCoordinate2D(latitude: pin.latitude, longitude: pin.longitude)) {
+                Button {
+                    navigation.selectedPinID = pin.pinID
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: pin.isVisible ? "mappin.circle.fill" : "mappin.slash.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(pin.isVisible ? .green : .orange)
+                        Text(pin.name)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.thinMaterial)
+                            .clipShape(Capsule())
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .ignoresSafeArea(edges: .bottom)
+        #endif
+    }
+
+    @ViewBuilder
+    private var mapOverlayPanel: some View {
+        let needsInstall = tileStore.availablePack == nil
+        let showOfflineMapBanner = !dismissedOfflineMapBanner && needsInstall
+        let showStarterUpgradeBanner = useOfflineTiles
+            && tileStore.isBundledStarterSelected
+            && !showOfflineMapBanner
+            && reachability.isOnline
+            && communityPackDownloadAvailable
+        let featuredPack = preferredFeaturedCountryPack()
+        let featuredInstallLabel = featuredPack.map(countryInstallButtonTitle(for:)) ?? String(localized: "semay.map.install", defaultValue: "Install")
+        let canInstallOnlinePackNow = reachability.isOnline && hubCatalogReachable && communityPackDownloadAvailable
+        let canInstallStarterNow = !reachability.isOnline && tileStore.canInstallBundledStarterPack
+        let canInstallNow = canInstallOnlinePackNow || canInstallStarterNow
+        let engineStatus = mapEngine.effectiveEngine == .maplibre
+            ? "Engine: Semay Map"
+            : (mapEngine.selectedEngine == .maplibre ? "Engine: MapKit fallback" : "Engine: MapKit")
+
+        #if os(iOS)
+        if useOfflineTiles, let pack = tileStore.availablePack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(mapSurfaceStatusText())
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                Text("Offline map: \(pack.name)")
+                    .font(.caption2)
+                Text(engineStatus)
+                    .font(.caption2)
+                if tileStore.isBundledStarterSelected {
+                    Text(String(
+                        localized: "semay.map.starter_limited",
+                        defaultValue: "Starter pack coverage is limited. Install full Eritrea pack for normal use."
+                    ))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(pack.attribution)
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.leading, 12)
+            .padding(.top, 10)
+        } else if useOSMBaseMap {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(mapSurfaceStatusText())
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                Text(engineStatus)
+                    .font(.caption2)
+                Text("© OpenStreetMap contributors")
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.leading, 12)
+            .padding(.top, 10)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(mapSurfaceStatusText())
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                Text(engineStatus)
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.leading, 12)
+            .padding(.top, 10)
+        }
+
+        if showOfflineMapBanner {
+            HStack(spacing: 10) {
+                Image(systemName: reachability.isOnline ? "map" : "wifi.slash")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Offline map")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text(
+                        !reachability.isOnline
+                            ? String(
+                                localized: "semay.map.banner.starter_available",
+                                defaultValue: "Starter map is available now. Upgrade later when online."
+                            )
+                            : (communityPackDownloadAvailable
+                               ? (reachability.isExpensive
+                                  ? String(
+                                    localized: "semay.map.banner.install_wifi",
+                                    defaultValue: "Install offline map pack (Wi-Fi recommended)."
+                                  )
+                                  : String(
+                                    localized: "semay.map.banner.install_offline",
+                                    defaultValue: "Install offline map pack for use without internet."
+                                  ))
+                               : String(
+                                localized: "semay.map.banner.catalog_unavailable",
+                                defaultValue: "Offline map catalog is unavailable right now."
+                               ))
+                    )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if canInstallNow {
+                    Button(installingCommunityPack ? "Installing..." : featuredInstallLabel) {
+                        Task {
+                            await installCommunityPack()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(installingCommunityPack)
+                }
+
+                Button("Continue") {
+                    dismissedOfflineMapBanner = true
+                }
+                .buttonStyle(.bordered)
+
+                if advancedSettingsEnabled, !reachability.isOnline {
+                    Button("Import") {
+                        showTileImporter = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+        }
+        if showStarterUpgradeBanner {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Starter map is limited")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text(String(
+                        localized: "semay.map.install_full_pack_prompt",
+                        defaultValue: "Install full Eritrea pack for city-wide offline coverage."
+                    ))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(
+                    installingCommunityPack
+                        ? "Installing..."
+                        : (canInstallOnlinePackNow ? featuredInstallLabel : String(localized: "semay.map.install_full_pack", defaultValue: "Install full pack"))
+                ) {
+                    Task {
+                        await installCommunityPack()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(installingCommunityPack || !canInstallOnlinePackNow)
+            }
+            .padding(10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+        }
+        #endif
+
+        VStack {
+            HStack(spacing: 8) {
+                Button {
+                    showExplore = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                        Text(String(
+                            localized: "semay.map.search.placeholder",
+                            defaultValue: "Search places, businesses, services, routes, bulletins, plus codes"
+                        ))
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Menu(String(localized: "semay.map.safety_alert", defaultValue: "Safety Alert")) {
+                    ForEach(safetyResources) { item in
+                        if let phone = item.phone,
+                           let url = telURL(for: phone) {
+                            Button("Call \(item.title)") {
+                                openURL(url)
+                            }
+                        } else {
+                            Button(item.title) {
+                                mapActionMessage = item.details
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, (showOfflineMapBanner || showStarterUpgradeBanner) ? 74 : 12)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+        mapSelectionPanel
+    }
+
+    @ViewBuilder
+    private var mapSelectionPanel: some View {
+        if let linkedService = selectedBusinessLinkedService {
+            serviceSelectionCard(linkedService)
+        } else if let linkedService = selectedPinLinkedService {
+            serviceSelectionCard(linkedService)
+        } else if let selected = selectedBusiness {
+            businessSelectionCard(selected)
+        } else if let selected = selectedRoute {
+            routeSelectionCard(selected)
+        } else if let selected = selectedPin {
+            pinSelectionCard(selected)
+        } else if let selected = selectedService {
+            serviceSelectionCard(selected)
+        } else {
+            Text(String(
+                localized: "semay.map.empty_hint",
+                defaultValue: "Tap a pin to view details. Use + to add places."
+            ))
+                .font(.caption)
+                .padding(10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding()
+        }
+    }
+
+    @ViewBuilder
+    private func businessSelectionCard(_ selected: BusinessProfile) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(selected.name).font(.headline)
+                Spacer()
+                Text("Business")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let linkedID = dataStore.linkedServiceID(entityType: "business", entityID: selected.businessID) {
+                servicePhotoPreview(serviceID: linkedID)
+            }
+            Text("\(selected.category) • \(selected.eAddress)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !selected.plusCode.isEmpty {
+                Text(selected.plusCode)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Updated \(Date(timeIntervalSince1970: TimeInterval(selected.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(selected.details)
+                .font(.subheadline)
+                .lineLimit(2)
+            if !selected.lightningLink.isEmpty || !selected.cashuLink.isEmpty {
+                HStack(spacing: 10) {
+                    if !selected.lightningLink.isEmpty {
+                        PaymentChipView(paymentType: .lightning(selected.lightningLink))
+                    }
+                    if !selected.cashuLink.isEmpty {
+                        PaymentChipView(paymentType: .cashu(selected.cashuLink))
+                    }
+                }
+            }
+            HStack {
+                if let tel = telURL(for: selected.phone) {
+                    Button("Call") {
+                        openURL(tel)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                ShareLink(item: businessShareText(selected)) {
+                    Text("Share")
+                }
+                .buttonStyle(.bordered)
+                Button("Promise Pay") {
+                    promisePayBusiness = selected
+                }
+                .buttonStyle(.bordered)
+                if let linkedID = dataStore.linkedServiceID(entityType: "business", entityID: selected.businessID) {
+                    Button("Directory") {
+                        navigation.selectedServiceID = linkedID
+                        navigation.selectedBusinessID = nil
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("Directions") {
+                    openDirections(latitude: selected.latitude, longitude: selected.longitude, name: selected.name)
+                }
+                .buttonStyle(.bordered)
+                .disabled(selected.latitude == 0 && selected.longitude == 0)
+                if dataStore.currentUserPubkey() == selected.ownerPubkey.lowercased() {
+                    Button("Update") {
+                        editingBusiness = selected
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Spacer()
+                Button("Close") {
+                    navigation.selectedBusinessID = nil
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding()
+    }
+
+    @ViewBuilder
+    private func routeSelectionCard(_ selected: SemayCuratedRoute) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(selected.title).font(.headline)
+                Spacer()
+                Text(selected.isSafe ? "🟢 Safe" : "🟠 Caution")
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.thinMaterial, in: Capsule())
+            }
+            Text("Route • \(routeTransportLabel(selected.transportType)) • \(selected.city)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !selected.summary.isEmpty {
+                Text(selected.summary)
+                    .font(.subheadline)
+                    .lineLimit(2)
+            }
+            Text("From: \(selected.fromLabel) → \(selected.toLabel)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Text("Trust \(selected.trustScore)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("•")
+                    .foregroundStyle(.secondary)
+                Text("Reliability \(selected.reliabilityScore)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            HStack {
+                if !selected.waypoints.isEmpty,
+                   let centerLatitude = selected.centerLatitude,
+                   let centerLongitude = selected.centerLongitude {
+                    Button("Open Map Area") {
+                        focus(latitude: centerLatitude, longitude: centerLongitude)
+                        navigation.pendingFocus = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Menu("Trust") {
+                    Button("Endorse as Safe") {
+                        let trusted = dataStore.endorseCuratedRoute(routeID: selected.routeID, score: 1, reason: "verified")
+                        mapActionMessage = trusted
+                            ? "Route endorsed as a safer option."
+                            : "Could not save endorsement right now."
+                    }
+                    Button("Report", role: .destructive) {
+                        dataStore.reportCuratedRoute(routeID: selected.routeID, reason: "mismatch")
+                        mapActionMessage = "Route report submitted."
+                    }
+                    if dataStore.currentUserPubkey() == selected.authorPubkey.lowercased() {
+                        Button("Retract", role: .destructive) {
+                            dataStore.retractCuratedRoute(routeID: selected.routeID)
+                            navigation.selectedRouteID = nil
+                            mapActionMessage = "Route marked retracted."
+                        }
+                    }
+                }
+                Button("Close") {
+                    navigation.selectedRouteID = nil
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding()
+    }
+
+    @ViewBuilder
+    private func pinSelectionCard(_ selected: SemayMapPin) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(selected.name).font(.headline)
+                Spacer()
+                Text(selected.isVisible ? "Visible" : "Pending")
+                    .font(.caption)
+                    .foregroundStyle(selected.isVisible ? .green : .orange)
+            }
+            Text("\(selected.type) • \(selected.eAddress)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !selected.plusCode.isEmpty {
+                Text(selected.plusCode)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Approvals: \(selected.approvalCount) • Updated \(Date(timeIntervalSince1970: TimeInterval(selected.updatedAt)).formatted(date: .abbreviated, time: .shortened))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(selected.details)
+                .font(.subheadline)
+                .lineLimit(2)
+            HStack {
+                Button("I'm Here / Approve") {
+                    approvePin(selected)
+                }
+                .buttonStyle(.borderedProminent)
+                ShareLink(item: placeShareText(selected)) {
+                    Text("Share")
+                }
+                .buttonStyle(.bordered)
+                if let tel = telURL(for: selected.phone) {
+                    Button("Call") {
+                        openURL(tel)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("Directions") {
+                    openDirections(latitude: selected.latitude, longitude: selected.longitude, name: selected.name)
+                }
+                .buttonStyle(.bordered)
+                if let linkedID = dataStore.linkedServiceID(entityType: "pin", entityID: selected.pinID) {
+                    Button("Directory") {
+                        navigation.selectedServiceID = linkedID
+                        navigation.selectedPinID = nil
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("Update") {
+                    editingPin = selected
+                    pinEditorCoordinate = nil
+                    showAddPin = true
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                Button("Close") {
+                    navigation.selectedPinID = nil
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding()
+    }
+
+    @ViewBuilder
+    private func serviceSelectionCard(_ selected: SemayServiceDirectoryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(selected.name).font(.headline)
+                Spacer()
+                Text(selected.urgency.uppercased())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            servicePhotoPreview(serviceID: selected.serviceID)
+            Text("\(selected.serviceType) • \(selected.category)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if selected.verified {
+                Text("Verified service")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            }
+            if !selected.addressLabel.isEmpty {
+                Text(selected.addressLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !selected.city.isEmpty || !selected.country.isEmpty {
+                Text([selected.city, selected.country].filter { !$0.isEmpty }.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(selected.trustBadge)
+                .font(.caption)
+            Text(shareStatusText(for: selected))
+                .font(.caption2)
+                .foregroundStyle(selected.shareScope == .network ? .blue : .secondary)
+            if selected.publishState == .rejected {
+                let reasons = qualityReasonList(from: selected.qualityReasonsJSON).map(qualityReasonLabel)
+                if !reasons.isEmpty {
+                    Text("Share blocked: \(reasons.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+            }
+            if !selected.details.isEmpty {
+                Text(selected.details)
+                    .font(.subheadline)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 8) {
+                if let phoneURL = telURL(for: selected.phone) {
+                    Button("Call") {
+                        openURL(phoneURL)
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                }
+                if let url = websiteURL(for: selected.website) {
+                    Button("Website") {
+                        openURL(url)
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                }
+            }
+            HStack {
+                Button(selected.latitude == 0 && selected.longitude == 0 ? "No location yet" : "Open on Map") {
+                    if selected.latitude != 0 || selected.longitude != 0 {
+                        focus(latitude: selected.latitude, longitude: selected.longitude)
+                        navigation.pendingFocus = true
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selected.latitude == 0 && selected.longitude == 0)
+                Menu("Trust") {
+                    Button("Endorse") {
+                        let trusted = dataStore.endorseServiceDirectoryEntry(serviceID: selected.serviceID, score: 1, reason: "verified")
+                        mapActionMessage = trusted
+                            ? "Service endorsed."
+                            : "Could not save endorsement right now."
+                    }
+                    Button("Report", role: .destructive) {
+                        dataStore.reportServiceDirectoryEntry(serviceID: selected.serviceID, reason: "mismatch")
+                        mapActionMessage = "Service report submitted."
+                    }
+                    if dataStore.currentUserPubkey() == selected.authorPubkey.lowercased() {
+                        Button("Retract", role: .destructive) {
+                            dataStore.retractServiceDirectoryEntry(serviceID: selected.serviceID)
+                            navigation.selectedServiceID = nil
+                            mapActionMessage = "Service marked retracted."
+                        }
+                    }
+                }
+                if dataStore.currentUserPubkey() == selected.authorPubkey.lowercased() {
+                    Menu("Sharing") {
+                        Button("Keep Personal") {
+                            keepPersonalOnly(for: selected)
+                        }
+                        Button("Share to Network") {
+                            requestNetworkShare(for: selected)
+                        }
+                    }
+                }
+                Button("Close") {
+                    navigation.selectedServiceID = nil
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding()
+    }
+
+    @ToolbarContentBuilder
+    private var mapToolbar: some ToolbarContent {
+        #if os(iOS)
+        ToolbarItem(placement: .topBarLeading) {
+            Menu("Jump") {
+                Button("Asmara") {
+                    centerMap(latitude: 15.3229, longitude: 38.9251, zoomDelta: 0.06)
+                }
+                Button("Addis Ababa") {
+                    centerMap(latitude: 8.9806, longitude: 38.7578, zoomDelta: 0.07)
+                }
+                Button("Fit All Pins") {
+                    fitMapToPins()
+                }
+                if advancedSettingsEnabled {
+                    Divider()
+                    Menu("Map Engine") {
+                        ForEach(MapEngine.allCases) { engine in
+                            Button {
+                                mapEngine.setPreferredEngine(engine)
+                            } label: {
+                                if mapEngine.selectedEngine == engine {
+                                    Label(engine.label, systemImage: "checkmark")
+                                } else {
+                                    Text(engine.label)
+                                }
+                            }
+                            .disabled(engine == .maplibre && !mapEngine.mapLibreAllowed)
+                        }
+                    }
                 }
             }
         }
+        #else
+        ToolbarItem(placement: .navigation) {
+            Menu("Jump") {
+                Button("Asmara") {
+                    centerMap(latitude: 15.3229, longitude: 38.9251, zoomDelta: 0.06)
+                }
+                Button("Addis Ababa") {
+                    centerMap(latitude: 8.9806, longitude: 38.7578, zoomDelta: 0.07)
+                }
+                Button("Fit All Pins") {
+                    fitMapToPins()
+                }
+                if advancedSettingsEnabled {
+                    Divider()
+                    Menu("Map Engine") {
+                        ForEach(MapEngine.allCases) { engine in
+                            Button {
+                                mapEngine.setPreferredEngine(engine)
+                            } label: {
+                                if mapEngine.selectedEngine == engine {
+                                    Label(engine.label, systemImage: "checkmark")
+                                } else {
+                                    Text(engine.label)
+                                }
+                            }
+                            .disabled(engine == .maplibre && !mapEngine.mapLibreAllowed)
+                        }
+                    }
+                }
+            }
+        }
+        #endif
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                editingPin = nil
+                pinEditorCoordinate = region.center
+                showAddPin = true
+            } label: {
+                Image(systemName: "plus")
+            }
+        }
+        #if os(iOS)
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showQRScanner = true
+            } label: {
+                Image(systemName: "qrcode.viewfinder")
+            }
+        }
+        #endif
     }
 
     private var selectedPin: SemayMapPin? {
@@ -723,11 +1660,99 @@ private struct SemayMapTabView: View {
         return dataStore.businesses.first(where: { $0.businessID == id })
     }
 
+    private var selectedBusinessLinkedService: SemayServiceDirectoryEntry? {
+        guard let business = selectedBusiness else { return nil }
+        guard let serviceID = dataStore.linkedServiceID(entityType: "business", entityID: business.businessID) else { return nil }
+        return dataStore.activeDirectoryServices.first(where: { $0.serviceID == serviceID })
+    }
+
+    private var selectedRoute: SemayCuratedRoute? {
+        guard let id = navigation.selectedRouteID else { return nil }
+        return dataStore.activeCuratedRoutes.first(where: { $0.routeID == id })
+    }
+
+    private var selectedService: SemayServiceDirectoryEntry? {
+        guard let id = navigation.selectedServiceID else { return nil }
+        return dataStore.activeDirectoryServices.first(where: { $0.serviceID == id })
+    }
+
+    private var selectedPinLinkedService: SemayServiceDirectoryEntry? {
+        guard let pin = selectedPin else { return nil }
+        guard let serviceID = dataStore.linkedServiceID(entityType: "pin", entityID: pin.pinID) else { return nil }
+        return dataStore.activeDirectoryServices.first(where: { $0.serviceID == serviceID })
+    }
+
+    @ViewBuilder
+    private func servicePhotoPreview(serviceID: String) -> some View {
+        let refs = dataStore.servicePhotoRefs(serviceID: serviceID)
+        if let primary = refs.first(where: { $0.primary }) ?? refs.first {
+            HStack(spacing: 10) {
+                Group {
+                    if let thumbURL = dataStore.servicePhotoThumbURL(serviceID: serviceID, photoID: primary.photoID) {
+                        #if os(iOS)
+                        if let image = UIImage(contentsOfFile: thumbURL.path) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(.thinMaterial)
+                                .overlay {
+                                    Image(systemName: "photo")
+                                        .foregroundStyle(.secondary)
+                                }
+                        }
+                        #else
+                        if let image = NSImage(contentsOf: thumbURL) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(.thinMaterial)
+                                .overlay {
+                                    Image(systemName: "photo")
+                                        .foregroundStyle(.secondary)
+                                }
+                        }
+                        #endif
+                    } else {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(.thinMaterial)
+                            .overlay {
+                                Image(systemName: "photo")
+                                    .foregroundStyle(.secondary)
+                            }
+                    }
+                }
+                .frame(width: 72, height: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(primary.remoteURL == nil ? "Photo evidence" : "Photo metadata only")
+                        .font(.caption)
+                    Text("Photos: \(max(1, refs.count))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+    }
+
+    private func routeTransportLabel(_ raw: String) -> String {
+        let transport = SemayRouteTransport(rawValue: raw.lowercased()) ?? .unknown
+        return transport.title
+    }
+
     private func centerMap(latitude: Double, longitude: Double, zoomDelta: Double) {
         region = MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
             span: MKCoordinateSpan(latitudeDelta: zoomDelta, longitudeDelta: zoomDelta)
         )
+    }
+
+    private func focus(latitude: Double, longitude: Double, zoomDelta: Double = 0.06) {
+        centerMap(latitude: latitude, longitude: longitude, zoomDelta: zoomDelta)
     }
 
     private func telURL(for rawPhone: String) -> URL? {
@@ -788,14 +1813,52 @@ private struct SemayMapTabView: View {
             latitude: (minLat + maxLat) / 2.0,
             longitude: (minLon + maxLon) / 2.0
         )
-        let latDelta = max(0.08, (maxLat - minLat) * 1.6)
-        let lonDelta = max(0.08, (maxLon - minLon) * 1.6)
+        let latDelta = max(0.04, (maxLat - minLat) * 1.6)
+        let lonDelta = max(0.04, (maxLon - minLon) * 1.6)
         region = MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta))
+    }
+
+    private func initializeMapViewport() {
+        if let currentLocation = locationState.lastKnownLocation {
+            centerMap(
+                latitude: currentLocation.coordinate.latitude,
+                longitude: currentLocation.coordinate.longitude,
+                zoomDelta: 0.06
+            )
+            return
+        }
+
+        if !dataStore.pins.isEmpty {
+            fitMapToPins()
+            return
+        }
+
+        if let bounds = tileStore.availablePack?.bounds {
+            let packedLatDelta = max(0.08, (bounds.maxLat - bounds.minLat) * 1.5)
+            let packedLonDelta = max(0.08, (bounds.maxLon - bounds.minLon) * 1.5)
+            let latDelta = min(packedLatDelta, 0.55)
+            let lonDelta = min(packedLonDelta, 0.55)
+            region = MKCoordinateRegion(
+                center: CLLocationCoordinate2D(
+                    latitude: (bounds.minLat + bounds.maxLat) / 2.0,
+                    longitude: (bounds.minLon + bounds.maxLon) / 2.0
+                ),
+                span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
+            )
+            return
+        }
+
+        centerMap(latitude: 15.3229, longitude: 38.9251, zoomDelta: 0.06)
     }
 
     private func autoSelectPackIfNeeded() {
         guard useOfflineTiles else { return }
-        guard let best = tileStore.bestPack(forLatitude: region.center.latitude, longitude: region.center.longitude) else { return }
+        let preferredZoom = estimatedZoomLevel(for: region)
+        guard let best = tileStore.bestPack(
+            forLatitude: region.center.latitude,
+            longitude: region.center.longitude,
+            preferredZoom: preferredZoom
+        ) else { return }
         guard best.path != tileStore.availablePack?.path else { return }
         guard best.path != lastAutoPackPath else { return }
         lastAutoPackPath = best.path
@@ -803,27 +1866,37 @@ private struct SemayMapTabView: View {
     }
 
     private func updateBaseLayerForConnectivity() {
-        // Keep the default map looking native whenever we can.
-        // Offline tiles are only used when offline and the current region is covered by a pack.
-        if !reachability.isOnline {
-            if let best = tileStore.bestPack(forLatitude: region.center.latitude, longitude: region.center.longitude) {
-                if best.path != tileStore.availablePack?.path {
-                    tileStore.selectPack(best)
-                }
-                useOfflineTiles = true
-                useOSMBaseMap = false
-                lastAutoPackPath = best.path
-                return
-            }
-            if let pack = tileStore.availablePack, pack.bounds == nil {
-                useOfflineTiles = true
-                useOSMBaseMap = false
-                return
-            }
+        if tileStore.isBundledStarterSelected {
+            useOfflineTiles = false
+            useOSMBaseMap = reachability.isOnline
+            return
         }
 
+        // Avoid patchy "tile island" UX: online mode only prefers offline when viewport coverage is strong.
+        let onlineOfflineThreshold = 0.70
+        if let best = tileStore.bestPackOrNil(for: region) {
+            let coverage = tileStore.coverageRatio(for: best, in: region)
+            if reachability.isOnline && coverage < onlineOfflineThreshold {
+                useOfflineTiles = false
+                useOSMBaseMap = true
+                return
+            }
+            if best.path != tileStore.availablePack?.path {
+                tileStore.selectPack(best)
+            }
+            useOfflineTiles = true
+            useOSMBaseMap = false
+            lastAutoPackPath = best.path
+            return
+        }
         useOfflineTiles = false
-        useOSMBaseMap = false
+        useOSMBaseMap = reachability.isOnline
+    }
+
+    private func estimatedZoomLevel(for region: MKCoordinateRegion) -> Int {
+        let lonDelta = max(0.0001, min(360, region.span.longitudeDelta))
+        let zoom = log2(360.0 / lonDelta)
+        return max(0, min(22, Int(round(zoom))))
     }
 
     private func approvePin(_ pin: SemayMapPin) {
@@ -857,19 +1930,35 @@ private struct SemayMapTabView: View {
         do {
             if reachability.isOnline {
                 do {
-                    let installed = try await tileStore.installRecommendedPack()
+                    let installed: OfflineTilePack
+                    if countryPacksEnabled,
+                       let preferred = preferredFeaturedCountryPack(),
+                       let packIdentifier = installIdentifier(for: preferred) {
+                        installed = try await tileStore.installCountryPack(packID: packIdentifier)
+                    } else {
+                        installed = try await tileStore.installRecommendedPack()
+                    }
                     updateBaseLayerForConnectivity()
+                    await refreshCommunityPackAvailability()
                     tileImportMessage = "Downloaded offline maps: \(installed.name)."
                     return
                 } catch {
-                    let reason = error.localizedDescription
+                    let reason = userFacingOfflineMapError(error)
+                    if isSignedPackPolicyError(error) {
+                        updateBaseLayerForConnectivity()
+                        await refreshCommunityPackAvailability()
+                        tileImportMessage = "Couldn't download offline maps (\(reason))."
+                        return
+                    }
                     if tileStore.availablePack == nil, tileStore.canInstallBundledStarterPack {
                         let installed = try tileStore.installBundledStarterPack()
                         updateBaseLayerForConnectivity()
+                        await refreshCommunityPackAvailability()
                         tileImportMessage = "Couldn't download full offline maps (\(reason)). Installed starter offline maps: \(installed.name)."
                         return
                     }
                     updateBaseLayerForConnectivity()
+                    await refreshCommunityPackAvailability()
                     tileImportMessage = "Couldn't download full offline maps (\(reason)). Keeping your current maps."
                     return
                 }
@@ -877,37 +1966,290 @@ private struct SemayMapTabView: View {
 
             let installed = try tileStore.installBundledStarterPack()
             updateBaseLayerForConnectivity()
+            await refreshCommunityPackAvailability()
             tileImportMessage = "Installed \(installed.name)."
         } catch {
-            tileImportMessage = error.localizedDescription
+            tileImportMessage = userFacingOfflineMapError(error)
         }
+    }
+
+    private func refreshCommunityPackAvailability() async {
+        guard reachability.isOnline else {
+            hubCatalogReachable = false
+            communityPackDownloadAvailable = false
+            featuredCountryPacks = []
+            return
+        }
+        do {
+            let packs = try await tileStore.fetchHubCatalog()
+            hubCatalogReachable = true
+            communityPackDownloadAvailable = !packs.isEmpty
+            featuredCountryPacks = packs
+                .filter { pack in
+                    let country = ((pack.countryCode ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+                    let region = ((pack.regionCode ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+                    return !country.isEmpty || !region.isEmpty
+                }
+                .sorted { lhs, rhs in
+                    let lhsFeatured = lhs.isFeatured ?? false
+                    let rhsFeatured = rhs.isFeatured ?? false
+                    if lhsFeatured != rhsFeatured {
+                        return lhsFeatured && !rhsFeatured
+                    }
+                    let lhsOrder = lhs.displayOrder ?? Int.max
+                    let rhsOrder = rhs.displayOrder ?? Int.max
+                    if lhsOrder != rhsOrder {
+                        return lhsOrder < rhsOrder
+                    }
+                    let lhsName = lhs.countryName ?? lhs.name
+                    let rhsName = rhs.countryName ?? rhs.name
+                    return lhsName.localizedCaseInsensitiveCompare(rhsName) == .orderedAscending
+                }
+        } catch {
+            hubCatalogReachable = false
+            communityPackDownloadAvailable = false
+            featuredCountryPacks = []
+        }
+    }
+
+    private func mapSurfaceStatusText() -> String {
+        if useOfflineTiles, tileStore.availablePack != nil {
+            return String(localized: "semay.map.state.offline_pack", defaultValue: "Offline pack installed")
+        }
+        if reachability.isOnline {
+            return String(localized: "semay.map.state.online", defaultValue: "Online map active")
+        }
+        return String(
+            localized: "semay.map.state.offline_unavailable",
+            defaultValue: "Offline map unavailable; download when online"
+        )
+    }
+
+    private func preferredFeaturedCountryPack() -> HubTilePack? {
+        guard countryPacksEnabled, !featuredCountryPacks.isEmpty else { return nil }
+        if let featured = featuredCountryPacks.first(where: { $0.isFeatured ?? false }) {
+            return featured
+        }
+        if let eritrea = featuredCountryPacks.first(where: {
+            (($0.countryCode ?? "").lowercased() == "er")
+                || (($0.regionCode ?? "").lowercased() == "er")
+                || $0.name.lowercased().contains("eritrea")
+        }) {
+            return eritrea
+        }
+        return featuredCountryPacks.first
+    }
+
+    private func installIdentifier(for pack: HubTilePack) -> String? {
+        let packID = (pack.packID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !packID.isEmpty {
+            return packID
+        }
+        let fallback = pack.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.isEmpty ? nil : fallback
+    }
+
+    private func countryInstallButtonTitle(for pack: HubTilePack) -> String {
+        let country = (pack.countryName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !country.isEmpty {
+            return "Download \(country)"
+        }
+        return String(localized: "semay.map.install", defaultValue: "Install")
+    }
+
+    private func websiteURL(for rawWebsite: String) -> URL? {
+        let trimmed = rawWebsite.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let parsed = URL(string: trimmed), parsed.scheme != nil {
+            return parsed
+        }
+        return URL(string: "https://\(trimmed)")
+    }
+
+    private func requestNetworkShare(for service: SemayServiceDirectoryEntry) {
+        let result = dataStore.requestNetworkShareForService(serviceID: service.serviceID)
+        if result.accepted {
+            mapActionMessage = "Listing queued for network sharing."
+            return
+        }
+        if result.reasons.isEmpty {
+            mapActionMessage = "Share request was blocked by quality checks."
+            return
+        }
+        mapActionMessage = "Share request blocked: \(result.reasons.joined(separator: ", "))."
+    }
+
+    private func keepPersonalOnly(for service: SemayServiceDirectoryEntry) {
+        dataStore.setServiceContributionScope(serviceID: service.serviceID, scope: .personal)
+        mapActionMessage = "Listing is now personal-only."
+    }
+
+    private func shareStatusText(for service: SemayServiceDirectoryEntry) -> String {
+        switch service.publishState {
+        case .localOnly:
+            return "Personal only"
+        case .pendingReview:
+            return "Queued for network"
+        case .published:
+            return "Published to network"
+        case .rejected:
+            return "Network share blocked"
+        }
+    }
+
+    private func qualityReasonList(from json: String) -> [String] {
+        guard let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private func qualityReasonLabel(_ key: String) -> String {
+        key.replacingOccurrences(of: "_", with: " ")
     }
 }
 
 #if os(iOS)
 private struct TilePackInfoSheet: View {
+    private struct PackHealthSummary {
+        enum Kind {
+            case healthy
+            case missingDeps
+            case hasDependents
+            case unresolved
+        }
+
+        let kind: Kind
+        let label: String
+        let tint: Color
+        let detail: String
+    }
+
+    private struct PackIntegritySummary {
+        enum Kind {
+            case unsigned
+            case hashVerified
+            case signatureVerified
+        }
+
+        let kind: Kind
+        let label: String
+        let tint: Color
+        let detail: String
+        let hashPreview: String
+        let signatureAlgorithm: String
+    }
+
+    private struct InstalledPackHealthRow: Identifiable {
+        let pack: OfflineTilePack
+        let activation: OfflineTilePackActivationStatus
+        let health: PackHealthSummary
+        let integrity: PackIntegritySummary
+
+        var id: String { pack.path }
+    }
+
+    private struct PackOpsSummary {
+        var total = 0
+        var healthy = 0
+        var missingDeps = 0
+        var hasDependents = 0
+        var unresolved = 0
+    }
+
     @Binding var isPresented: Bool
     @ObservedObject var tileStore: OfflineTileStore
     @Binding var useOfflineTiles: Bool
     @Binding var useOSMBaseMap: Bool
     @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
+    @AppStorage("semay.map.country_packs.enabled") private var countryPacksEnabled = false
+    @AppStorage("semay.offline_maps.require_signed_packs") private var requireSignedOfflinePacks = false
     @State private var hubPacks: [HubTilePack] = []
+    @State private var featuredCountryPacks: [HubTilePack] = []
+    @State private var loadingCountryPacks = false
+    @State private var installingCountryPackID: String?
     @State private var loadingHubPacks = false
     @State private var downloadingPackID: String?
     @State private var publishingPack = false
     @State private var hubError = ""
     @State private var hubNotice = ""
+    @State private var pendingCascadeDeletePlan: OfflineTilePackCascadeDeletionPlan?
+    @State private var showingCascadeDeleteConfirm = false
 
     private var selectedPack: OfflineTilePack? {
         tileStore.availablePack
     }
 
+    private var installedPackRows: [InstalledPackHealthRow] {
+        tileStore.packs.map { pack in
+            let activation = tileStore.activationStatus(for: pack)
+            return InstalledPackHealthRow(
+                pack: pack,
+                activation: activation,
+                health: packHealth(for: pack, activationStatus: activation),
+                integrity: packIntegrity(for: pack)
+            )
+        }
+    }
+
+    private var opsSummary: PackOpsSummary {
+        var summary = PackOpsSummary()
+        for row in installedPackRows {
+            summary.total += 1
+            switch row.health.kind {
+            case .healthy:
+                summary.healthy += 1
+            case .missingDeps:
+                summary.missingDeps += 1
+            case .hasDependents:
+                summary.hasDependents += 1
+            case .unresolved:
+                summary.unresolved += 1
+            }
+        }
+        return summary
+    }
+
+    private var selectedPackHealth: PackHealthSummary? {
+        guard let selectedPack else { return nil }
+        if let existing = installedPackRows.first(where: { $0.pack.path == selectedPack.path }) {
+            return existing.health
+        }
+        return packHealth(for: selectedPack)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                if opsSummary.total > 0 {
+                    Section("Ops Summary") {
+                        LabeledContent("Installed", value: "\(opsSummary.total)")
+                        LabeledContent("Healthy", value: "\(opsSummary.healthy)")
+                        LabeledContent("Missing Deps", value: "\(opsSummary.missingDeps)")
+                        LabeledContent("Has Dependents", value: "\(opsSummary.hasDependents)")
+                        LabeledContent("Unresolved", value: "\(opsSummary.unresolved)")
+                    }
+                }
+
                 Section("Selected Pack") {
                     if let pack = selectedPack {
+                        let health = selectedPackHealth ?? packHealth(for: pack)
+                        let integrity = installedPackRows.first(where: { $0.pack.path == pack.path })?.integrity ?? packIntegrity(for: pack)
                         LabeledContent("Name", value: pack.name)
+                        LabeledContent("Health") {
+                            healthBadge(health)
+                        }
+                        LabeledContent("Integrity") {
+                            statusBadge(label: integrity.label, tint: integrity.tint)
+                        }
+                        if let version = pack.packVersion, !version.isEmpty {
+                            LabeledContent("Version", value: version)
+                        }
+                        if let region = pack.regionCode, !region.isEmpty {
+                            LabeledContent("Region", value: region.uppercased())
+                        }
+                        LabeledContent("Format", value: pack.tileFormat.rawValue)
                         LabeledContent("Zoom", value: "\(pack.minZoom)–\(pack.maxZoom)")
                         if let bounds = pack.bounds {
                             LabeledContent("Bounds", value: "\(format(bounds.minLat)),\(format(bounds.minLon)) → \(format(bounds.maxLat)),\(format(bounds.maxLon))")
@@ -916,18 +2258,105 @@ private struct TilePackInfoSheet: View {
                         }
                         LabeledContent("Size", value: formatSize(pack.sizeBytes))
                         LabeledContent("Attribution", value: pack.attribution)
+                        if !integrity.hashPreview.isEmpty {
+                            LabeledContent("SHA256", value: integrity.hashPreview)
+                        }
+                        if !integrity.signatureAlgorithm.isEmpty {
+                            LabeledContent("Signature", value: integrity.signatureAlgorithm)
+                        }
+                        if !integrity.detail.isEmpty {
+                            Text(integrity.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("No offline pack selected.")
                             .foregroundStyle(.secondary)
                     }
                 }
 
+                if !hubNotice.isEmpty || !hubError.isEmpty {
+                    Section("Status") {
+                        if !hubNotice.isEmpty {
+                            Text(hubNotice)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if !hubError.isEmpty {
+                            Text(hubError)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+
+                if countryPacksEnabled {
+                    Section("Country Packs") {
+                        HStack {
+                            Text("Free downloads. Eritrea is featured first.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button(loadingCountryPacks ? "Loading..." : "Refresh") {
+                                Task {
+                                    await loadCountryPacks()
+                                }
+                            }
+                            .disabled(loadingCountryPacks)
+                        }
+
+                        if loadingCountryPacks {
+                            ProgressView()
+                        } else if featuredCountryPacks.isEmpty {
+                            Text("No country packs available right now.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(featuredCountryPacks, id: \.id) { pack in
+                                let dependencies = pack.dependsOn ?? []
+                                HStack(alignment: .center, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: 8) {
+                                            Text(pack.countryName ?? pack.name)
+                                            if pack.isFeatured ?? false {
+                                                statusBadge(label: "Featured", tint: .blue)
+                                            }
+                                        }
+                                        Text(
+                                            "Pack: \(pack.name) • \(formatSize(pack.downloadSizeBytes ?? pack.sizeBytes))"
+                                        )
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        if !dependencies.isEmpty {
+                                            Text("Dependencies: \(dependencies.joined(separator: ", "))")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if let minVersion = pack.minAppVersion, !minVersion.isEmpty {
+                                            Text("Requires app version \(minVersion)+")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Button(installingCountryPackID == pack.id ? "Installing..." : "Install") {
+                                        Task {
+                                            await installCountryPack(pack)
+                                        }
+                                    }
+                                    .disabled(installingCountryPackID == pack.id)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Section("Available Packs") {
-                    if tileStore.packs.isEmpty {
+                    if installedPackRows.isEmpty {
                         Text("No packs installed.")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(tileStore.packs, id: \.path) { pack in
+                        ForEach(installedPackRows) { row in
+                            let pack = row.pack
                             Button {
                                 tileStore.selectPack(pack)
                                 useOfflineTiles = true
@@ -939,6 +2368,13 @@ private struct TilePackInfoSheet: View {
                                         Text(formatSize(pack.sizeBytes))
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+                                        healthBadge(row.health)
+                                        statusBadge(label: row.integrity.label, tint: row.integrity.tint)
+                                        if !row.health.detail.isEmpty {
+                                            Text(row.health.detail)
+                                                .font(.caption2)
+                                                .foregroundStyle(row.health.tint)
+                                        }
                                     }
                                     Spacer()
                                     if pack.path == selectedPack?.path {
@@ -947,12 +2383,45 @@ private struct TilePackInfoSheet: View {
                                     }
                                 }
                             }
+                            .disabled(!row.activation.canActivate)
                         }
                     }
                 }
 
                 if let pack = selectedPack {
+                    let deletionPlan = tileStore.deletionPlan(for: pack)
+                    let cascadePlan = tileStore.cascadeDeletionPlan(for: pack)
+                    let activation = tileStore.activationStatus(for: pack)
+                    let activationChain = tileStore.activationChain(for: pack)
+                    Section("Dependency Graph") {
+                        if !activationChain.isEmpty {
+                            Text("Activation: \(activationGraphLabel(for: activationChain))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if activation.hasBlockingDependencies {
+                            Text("Missing deps: \(activation.missingDependencies.joined(separator: ", "))")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        if !cascadePlan.dependents.isEmpty {
+                            Text("Dependents: \(collapsedPackNames(from: cascadePlan.dependents))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if activationChain.isEmpty, cascadePlan.dependents.isEmpty {
+                            Text("No dependency links detected for this pack.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     Section("Manage") {
+                        if !deletionPlan.canDelete {
+                            Text("This pack is required by: \(deletionPlan.blockingDependents.map(\.name).joined(separator: ", ")).")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                         if advancedSettingsEnabled {
                             Button(publishingPack ? "Publishing..." : "Publish Selected Pack to Source") {
                                 Task {
@@ -960,12 +2429,20 @@ private struct TilePackInfoSheet: View {
                                 }
                             }
                             .disabled(publishingPack)
+                            if !deletionPlan.canDelete {
+                                Button(role: .destructive) {
+                                    beginCascadeDelete(cascadePlan)
+                                } label: {
+                                    Text(cascadeDeleteButtonTitle(for: cascadePlan))
+                                }
+                            }
                         }
                         Button(role: .destructive) {
                             removePack(pack)
                         } label: {
                             Text("Delete Pack")
                         }
+                        .disabled(!deletionPlan.canDelete)
                     }
                 }
 
@@ -987,41 +2464,91 @@ private struct TilePackInfoSheet: View {
                             ProgressView()
                         }
 
-                        if !hubNotice.isEmpty {
-                            Text(hubNotice)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if !hubError.isEmpty {
-                            Text(hubError)
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-
                         if hubPacks.isEmpty {
                             Text("No packs loaded from node yet.")
                                 .foregroundStyle(.secondary)
                         } else {
+                            let summary = catalogReadinessSummary(for: hubPacks)
+                            let security = catalogIntegritySummary(for: hubPacks)
+                            Text("Catalog: \(summary.ready) ready • \(summary.blocked) blocked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("Integrity: \(security.signed) signed • \(security.hashed) hashed • \(security.unverified) unverified")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if requireSignedOfflinePacks {
+                                Text("Policy: signed packs required")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             ForEach(hubPacks, id: \.id) { pack in
+                                let installPlan = tileStore.installPlan(for: pack, catalog: hubPacks)
+                                let policyBlocked = requireSignedOfflinePacks && !catalogPackSatisfiesSignedPolicy(pack)
                                 HStack(alignment: .center, spacing: 12) {
                                     VStack(alignment: .leading, spacing: 4) {
-                                        Text(pack.name)
-                                        Text("Zoom \(pack.minZoom)-\(pack.maxZoom) • \(formatSize(pack.sizeBytes))")
+                                        HStack(spacing: 8) {
+                                            Text(pack.name)
+                                            statusBadge(
+                                                label: catalogStatusLabel(for: installPlan),
+                                                tint: catalogStatusTint(for: installPlan)
+                                            )
+                                            statusBadge(
+                                                label: catalogIntegrityLabel(for: pack),
+                                                tint: catalogIntegrityTint(for: pack)
+                                            )
+                                        }
+                                        let version = (pack.packVersion ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                        let region = (pack.regionCode ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                        let format = (pack.tileFormat ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                        Text(
+                                            "Zoom \(pack.minZoom)-\(pack.maxZoom) • \(formatSize(pack.sizeBytes))"
+                                            + (version.isEmpty ? "" : " • v\(version)")
+                                            + (region.isEmpty ? "" : " • \(region.uppercased())")
+                                            + (format.isEmpty ? "" : " • \(format)")
+                                        )
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+                                        if !installPlan.dependenciesToInstall.isEmpty {
+                                            Text("Graph: \(installGraphLabel(pack: pack, plan: installPlan))")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if !installPlan.missingDependencies.isEmpty {
+                                            Text("Missing deps: \(installPlan.missingDependencies.joined(separator: ", "))")
+                                                .font(.caption)
+                                                .foregroundStyle(.orange)
+                                        } else if !installPlan.alreadySatisfiedDependencies.isEmpty {
+                                            Text("Deps ready: \(installPlan.alreadySatisfiedDependencies.joined(separator: ", "))")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if installPlan.hasCycle {
+                                            Text("Dependency cycle detected.")
+                                                .font(.caption)
+                                                .foregroundStyle(.orange)
+                                        }
+                                        if policyBlocked {
+                                            Text("Signed-pack policy blocks install: hash/signature metadata required.")
+                                                .font(.caption)
+                                                .foregroundStyle(.orange)
+                                        }
                                     }
                                     Spacer()
                                     if selectedPack?.path.lowercased().hasSuffix(pack.fileName.lowercased()) == true {
                                         Image(systemName: "checkmark.circle.fill")
                                             .foregroundStyle(.green)
                                     } else {
-                                        Button(downloadingPackID == pack.id ? "Installing..." : "Install") {
+                                        Button(installButtonTitle(for: pack, plan: installPlan)) {
                                             Task {
                                                 await installHubPack(pack)
                                             }
                                         }
-                                        .disabled(downloadingPackID == pack.id)
+                                        .disabled(
+                                            downloadingPackID == pack.id ||
+                                                installPlan.hasCycle ||
+                                                !installPlan.missingDependencies.isEmpty ||
+                                                policyBlocked
+                                        )
                                     }
                                 }
                             }
@@ -1035,7 +2562,70 @@ private struct TilePackInfoSheet: View {
                     Button("Done") { isPresented = false }
                 }
             }
+            .confirmationDialog(
+                "Delete With Dependents",
+                isPresented: $showingCascadeDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                if let plan = pendingCascadeDeletePlan {
+                    Button(cascadeConfirmButtonTitle(for: plan), role: .destructive) {
+                        executeCascadeDelete(plan)
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingCascadeDeletePlan = nil
+                }
+            } message: {
+                if let plan = pendingCascadeDeletePlan {
+                    Text(cascadeDeleteMessage(for: plan))
+                }
+            }
+            .task {
+                if countryPacksEnabled && featuredCountryPacks.isEmpty {
+                    await loadCountryPacks()
+                }
+            }
         }
+    }
+
+    private func loadCountryPacks() async {
+        loadingCountryPacks = true
+        hubError = ""
+        defer { loadingCountryPacks = false }
+        do {
+            featuredCountryPacks = try await tileStore.featuredCountryPacks()
+        } catch {
+            featuredCountryPacks = []
+            hubError = error.localizedDescription
+        }
+    }
+
+    private func installCountryPack(_ pack: HubTilePack) async {
+        guard let identifier = countryPackIdentifier(for: pack) else {
+            hubError = "Pack identifier is missing for \(pack.name)."
+            return
+        }
+        installingCountryPackID = pack.id
+        hubError = ""
+        hubNotice = ""
+        defer { installingCountryPackID = nil }
+        do {
+            let installed = try await tileStore.installCountryPack(packID: identifier)
+            useOfflineTiles = true
+            useOSMBaseMap = false
+            hubNotice = "Installed \(installed.name)."
+        } catch {
+            hubError = userFacingOfflineMapError(error)
+        }
+    }
+
+    private func countryPackIdentifier(for pack: HubTilePack) -> String? {
+        let packID = (pack.packID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !packID.isEmpty {
+            return packID
+        }
+        let fallback = pack.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.isEmpty ? nil : fallback
     }
 
     private func loadHubCatalog() async {
@@ -1055,12 +2645,22 @@ private struct TilePackInfoSheet: View {
         hubNotice = ""
         defer { downloadingPackID = nil }
         do {
-            let installed = try await tileStore.installHubPack(pack)
+            let plan = tileStore.installPlan(for: pack, catalog: hubPacks)
+            if plan.hasCycle {
+                hubError = "Dependency cycle detected for \(pack.name)."
+                return
+            }
+            if !plan.missingDependencies.isEmpty {
+                hubError = "Missing required dependencies: \(plan.missingDependencies.joined(separator: ", "))"
+                return
+            }
+
+            let result = try await tileStore.installHubPackWithDependencies(pack, catalog: hubPacks)
             useOfflineTiles = true
             useOSMBaseMap = false
-            hubNotice = "Installed \(installed.name) from node."
+            hubNotice = installNotice(for: result)
         } catch {
-            hubError = error.localizedDescription
+            hubError = userFacingOfflineMapError(error)
         }
     }
 
@@ -1074,18 +2674,42 @@ private struct TilePackInfoSheet: View {
             hubNotice = "Published \(published.name) to node."
             await loadHubCatalog()
         } catch {
-            hubError = error.localizedDescription
+            hubError = userFacingOfflineMapError(error)
         }
     }
 
     private func removePack(_ pack: OfflineTilePack) {
-        let fm = FileManager.default
         do {
-            try fm.removeItem(atPath: pack.path)
+            try tileStore.deletePack(pack)
+            hubNotice = "Deleted \(pack.name)."
+            hubError = ""
         } catch {
-            // Ignore delete failures; refresh anyway.
+            hubError = error.localizedDescription
+            hubNotice = ""
         }
-        tileStore.refresh()
+        if tileStore.availablePack == nil {
+            useOfflineTiles = false
+            useOSMBaseMap = false
+        }
+    }
+
+    private func beginCascadeDelete(_ plan: OfflineTilePackCascadeDeletionPlan) {
+        guard plan.hasDependents else { return }
+        pendingCascadeDeletePlan = plan
+        showingCascadeDeleteConfirm = true
+    }
+
+    private func executeCascadeDelete(_ plan: OfflineTilePackCascadeDeletionPlan) {
+        do {
+            let removed = try tileStore.deletePackCascadingDependents(plan.target)
+            hubNotice = "Deleted \(removed.count) packs: \(collapsedPackNames(from: removed))."
+            hubError = ""
+        } catch {
+            hubError = error.localizedDescription
+            hubNotice = ""
+        }
+
+        pendingCascadeDeletePlan = nil
         if tileStore.availablePack == nil {
             useOfflineTiles = false
             useOSMBaseMap = false
@@ -1096,24 +2720,674 @@ private struct TilePackInfoSheet: View {
         String(format: "%.4f", value)
     }
 
+    private func formatPercent(_ value: Double) -> String {
+        String(format: "%.2f%%", value)
+    }
+
     private func formatSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
     }
+
+    private func installButtonTitle(for pack: HubTilePack, plan: HubTilePackInstallPlan) -> String {
+        if downloadingPackID == pack.id {
+            return "Installing..."
+        }
+        if plan.dependenciesToInstall.isEmpty {
+            return "Install"
+        }
+        return "Install +\(plan.dependenciesToInstall.count)"
+    }
+
+    private func installNotice(for result: HubTilePackInstallResult) -> String {
+        var segments: [String] = ["Installed \(result.primary.name) from node."]
+        if !result.installedDependencies.isEmpty {
+            let names = result.installedDependencies.map(\.name).joined(separator: ", ")
+            segments.append("Dependencies installed: \(names).")
+        }
+        if !result.alreadySatisfiedDependencies.isEmpty {
+            segments.append("Dependencies already available: \(result.alreadySatisfiedDependencies.joined(separator: ", ")).")
+        }
+        return segments.joined(separator: " ")
+    }
+
+    private func activationGraphLabel(for chain: [OfflineTilePack]) -> String {
+        chain.map(\.name).joined(separator: " -> ")
+    }
+
+    private func installGraphLabel(pack: HubTilePack, plan: HubTilePackInstallPlan) -> String {
+        var names = plan.dependenciesToInstall.map(\.name)
+        names.append(pack.name)
+        return names.joined(separator: " -> ")
+    }
+
+    private func packHealth(
+        for pack: OfflineTilePack,
+        activationStatus: OfflineTilePackActivationStatus? = nil
+    ) -> PackHealthSummary {
+        let activation = activationStatus ?? tileStore.activationStatus(for: pack)
+        if !activation.canActivate {
+            if activation.hasBlockingDependencies {
+                return PackHealthSummary(
+                    kind: .missingDeps,
+                    label: "Missing Deps",
+                    tint: .orange,
+                    detail: "Missing: \(activation.missingDependencies.joined(separator: ", "))"
+                )
+            }
+            return PackHealthSummary(
+                kind: .unresolved,
+                label: "Unresolved",
+                tint: .orange,
+                detail: "Dependency chain is unresolved."
+            )
+        }
+
+        let deletion = tileStore.deletionPlan(for: pack)
+        if !deletion.canDelete {
+            let count = deletion.blockingDependents.count
+            return PackHealthSummary(
+                kind: .hasDependents,
+                label: "Has Dependents",
+                tint: .blue,
+                detail: "Required by \(count) pack\(count == 1 ? "" : "s")."
+            )
+        }
+
+        return PackHealthSummary(kind: .healthy, label: "Healthy", tint: .green, detail: "")
+    }
+
+    private func packIntegrity(for pack: OfflineTilePack) -> PackIntegritySummary {
+        let install = SemayDataStore.shared.offlinePackInstall(path: pack.path)
+        let hash = normalizedText(install?.sha256)
+        let signature = normalizedText(install?.signature)
+        let sigAlg = normalizedText(install?.sigAlg)?.uppercased() ?? ""
+
+        if signature != nil {
+            let detail = sigAlg.isEmpty
+                ? "Signature metadata available."
+                : "Signature verified using \(sigAlg)."
+            return PackIntegritySummary(
+                kind: .signatureVerified,
+                label: "Signed",
+                tint: .green,
+                detail: detail,
+                hashPreview: shortHash(hash),
+                signatureAlgorithm: sigAlg
+            )
+        }
+
+        if hash != nil {
+            return PackIntegritySummary(
+                kind: .hashVerified,
+                label: "Hash Verified",
+                tint: .blue,
+                detail: "SHA256 metadata available.",
+                hashPreview: shortHash(hash),
+                signatureAlgorithm: ""
+            )
+        }
+
+        return PackIntegritySummary(
+            kind: .unsigned,
+            label: "Unverified",
+            tint: .orange,
+            detail: "No hash/signature metadata.",
+            hashPreview: "",
+            signatureAlgorithm: ""
+        )
+    }
+
+    private func normalizedText(_ value: String?) -> String? {
+        guard let text = value?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+        return text
+    }
+
+    private func shortHash(_ hash: String?) -> String {
+        guard let hash = normalizedText(hash) else { return "" }
+        if hash.count <= 18 {
+            return hash
+        }
+        return "\(hash.prefix(10))...\(hash.suffix(8))"
+    }
+
+    @ViewBuilder
+    private func statusBadge(label: String, tint: Color) -> some View {
+        Text(label)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .foregroundStyle(tint)
+            .background(tint.opacity(0.16), in: Capsule())
+    }
+
+    @ViewBuilder
+    private func healthBadge(_ health: PackHealthSummary) -> some View {
+        statusBadge(label: health.label, tint: health.tint)
+    }
+
+    private func catalogStatusLabel(for plan: HubTilePackInstallPlan) -> String {
+        if plan.hasCycle {
+            return "Cycle"
+        }
+        if !plan.missingDependencies.isEmpty {
+            return "Blocked"
+        }
+        if !plan.dependenciesToInstall.isEmpty {
+            return "Ready+\(plan.dependenciesToInstall.count)"
+        }
+        return "Ready"
+    }
+
+    private func catalogStatusTint(for plan: HubTilePackInstallPlan) -> Color {
+        if plan.hasCycle || !plan.missingDependencies.isEmpty {
+            return .orange
+        }
+        if !plan.dependenciesToInstall.isEmpty {
+            return .blue
+        }
+        return .green
+    }
+
+    private func catalogReadinessSummary(for packs: [HubTilePack]) -> (ready: Int, blocked: Int) {
+        var ready = 0
+        var blocked = 0
+        for pack in packs {
+            let plan = tileStore.installPlan(for: pack, catalog: packs)
+            if plan.hasCycle || !plan.missingDependencies.isEmpty {
+                blocked += 1
+            } else {
+                ready += 1
+            }
+        }
+        return (ready, blocked)
+    }
+
+    private func catalogIntegritySummary(for packs: [HubTilePack]) -> (signed: Int, hashed: Int, unverified: Int) {
+        var signed = 0
+        var hashed = 0
+        var unverified = 0
+        for pack in packs {
+            let hasHash = normalizedText(pack.sha256) != nil
+            let hasSignature = normalizedText(pack.signature) != nil
+            if hasSignature && hasHash {
+                signed += 1
+            } else if hasHash {
+                hashed += 1
+            } else {
+                unverified += 1
+            }
+        }
+        return (signed, hashed, unverified)
+    }
+
+    private func catalogIntegrityLabel(for pack: HubTilePack) -> String {
+        let hasHash = normalizedText(pack.sha256) != nil
+        let hasSignature = normalizedText(pack.signature) != nil
+        if hasSignature && hasHash {
+            return "Signed"
+        }
+        if hasHash {
+            return "Hashed"
+        }
+        return "Unverified"
+    }
+
+    private func catalogIntegrityTint(for pack: HubTilePack) -> Color {
+        switch catalogIntegrityLabel(for: pack) {
+        case "Signed":
+            return .green
+        case "Hashed":
+            return .blue
+        default:
+            return .orange
+        }
+    }
+
+    private func catalogPackSatisfiesSignedPolicy(_ pack: HubTilePack) -> Bool {
+        normalizedText(pack.sha256) != nil && normalizedText(pack.signature) != nil
+    }
+
+    private func cascadeDeleteButtonTitle(for plan: OfflineTilePackCascadeDeletionPlan) -> String {
+        if !plan.hasDependents {
+            return "Delete With Dependents"
+        }
+        return "Delete With \(plan.dependents.count) Dependents"
+    }
+
+    private func cascadeConfirmButtonTitle(for plan: OfflineTilePackCascadeDeletionPlan) -> String {
+        "Delete \(plan.deletionOrder.count) Packs"
+    }
+
+    private func cascadeDeleteMessage(for plan: OfflineTilePackCascadeDeletionPlan) -> String {
+        let names = plan.deletionOrder.map(\.name)
+        return "This permanently deletes: \(collapsedPackNames(from: names))."
+    }
+
+    private func collapsedPackNames(from packs: [OfflineTilePack]) -> String {
+        collapsedPackNames(from: packs.map(\.name))
+    }
+
+    private func collapsedPackNames(from names: [String]) -> String {
+        if names.count <= 3 {
+            return names.joined(separator: ", ")
+        }
+        let prefix = names.prefix(3).joined(separator: ", ")
+        return "\(prefix), +\(names.count - 3) more"
+    }
 }
 #endif
 
 #if os(iOS)
-private struct SemayMapView: UIViewRepresentable {
+private struct SemayMapCanvas: View {
+    @ObservedObject var mapEngine: MapEngineCoordinator
     @Binding var region: MKCoordinateRegion
     let pins: [SemayMapPin]
     @Binding var selectedPinID: String?
     let businesses: [BusinessProfile]
     @Binding var selectedBusinessID: String?
+    let routes: [SemayCuratedRoute]
+    @Binding var selectedRouteID: String?
+    let services: [SemayServiceDirectoryEntry]
+    @Binding var selectedServiceID: String?
     @Binding var useOSMBaseMap: Bool
-    let offlinePack: OfflineTilePack?
+    let offlinePacks: [OfflineTilePack]
+    @Binding var useOfflineTiles: Bool
+    let onLongPress: (CLLocationCoordinate2D) -> Void
+
+    var body: some View {
+        if mapEngine.effectiveEngine == .maplibre {
+            SemayMapLibreView(
+                region: $region,
+                pins: pins,
+                selectedPinID: $selectedPinID,
+                businesses: businesses,
+                selectedBusinessID: $selectedBusinessID,
+                routes: routes,
+                selectedRouteID: $selectedRouteID,
+                services: services,
+                selectedServiceID: $selectedServiceID,
+                offlinePacks: offlinePacks,
+                useOfflineTiles: useOfflineTiles,
+                useOSMBaseMap: $useOSMBaseMap,
+                onLongPress: onLongPress,
+                onRuntimeError: { reason in
+                    mapEngine.markMapLibreFailure(reason)
+                }
+            )
+        } else {
+            SemayMapKitView(
+                region: $region,
+                pins: pins,
+                selectedPinID: $selectedPinID,
+                businesses: businesses,
+                selectedBusinessID: $selectedBusinessID,
+                routes: routes,
+                selectedRouteID: $selectedRouteID,
+                services: services,
+                selectedServiceID: $selectedServiceID,
+                useOSMBaseMap: $useOSMBaseMap,
+                offlinePacks: offlinePacks,
+                useOfflineTiles: $useOfflineTiles,
+                onLongPress: onLongPress
+            )
+        }
+    }
+}
+
+#if canImport(MapLibre)
+private struct SemayMapLibreView: UIViewRepresentable {
+    @Binding var region: MKCoordinateRegion
+    let pins: [SemayMapPin]
+    @Binding var selectedPinID: String?
+    let businesses: [BusinessProfile]
+    @Binding var selectedBusinessID: String?
+    let routes: [SemayCuratedRoute]
+    @Binding var selectedRouteID: String?
+    let services: [SemayServiceDirectoryEntry]
+    @Binding var selectedServiceID: String?
+    let offlinePacks: [OfflineTilePack]
+    let useOfflineTiles: Bool
+    @Binding var useOSMBaseMap: Bool
+    let onLongPress: (CLLocationCoordinate2D) -> Void
+    let onRuntimeError: (String) -> Void
+
+    func makeUIView(context: Context) -> MLNMapView {
+        let styleURL = context.coordinator.resolveStyleURL(
+            useOfflineTiles: useOfflineTiles,
+            offlinePacks: offlinePacks,
+            useOSMBaseMap: useOSMBaseMap
+        )
+        let mapView = MLNMapView(frame: .zero, styleURL: styleURL)
+        mapView.delegate = context.coordinator
+        mapView.showsScale = true
+        mapView.showsCompass = true
+        mapView.setCenter(region.center, zoomLevel: 12, animated: false)
+        context.coordinator.applyZoomLimits(on: mapView, useOfflineTiles: useOfflineTiles, offlinePacks: offlinePacks)
+
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.5
+        mapView.addGestureRecognizer(longPress)
+        context.coordinator.syncMapContent(
+            on: mapView,
+            pins: pins,
+            businesses: businesses,
+            routes: routes,
+            services: services
+        )
+        return mapView
+    }
+
+    func updateUIView(_ mapView: MLNMapView, context: Context) {
+        let center = mapView.centerCoordinate
+        let centerDiff = abs(center.latitude - region.center.latitude) + abs(center.longitude - region.center.longitude)
+        if centerDiff > 0.001 {
+            mapView.setCenter(region.center, zoomLevel: mapView.zoomLevel, animated: true)
+        }
+        context.coordinator.applyStyleIfNeeded(
+            on: mapView,
+            useOfflineTiles: useOfflineTiles,
+            offlinePacks: offlinePacks,
+            useOSMBaseMap: useOSMBaseMap
+        )
+        context.coordinator.applyZoomLimits(on: mapView, useOfflineTiles: useOfflineTiles, offlinePacks: offlinePacks)
+        context.coordinator.syncMapContent(
+            on: mapView,
+            pins: pins,
+            businesses: businesses,
+            routes: routes,
+            services: services
+        )
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    final class Coordinator: NSObject, MLNMapViewDelegate {
+        private let parent: SemayMapLibreView
+        private var styleSignature: String?
+
+        init(_ parent: SemayMapLibreView) {
+            self.parent = parent
+            super.init()
+        }
+
+        @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began else { return }
+            guard let mapView = gesture.view as? MLNMapView else { return }
+            let point = gesture.location(in: mapView)
+            let coordinate = mapView.convert(point, toCoordinateFrom: mapView)
+            parent.onLongPress(coordinate)
+        }
+
+        func mapView(_ mapView: MLNMapView, regionDidChangeAnimated animated: Bool) {
+            let bounds = mapView.visibleCoordinateBounds
+            let center = mapView.centerCoordinate
+            parent.region = MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(
+                    latitudeDelta: abs(bounds.ne.latitude - bounds.sw.latitude),
+                    longitudeDelta: abs(bounds.ne.longitude - bounds.sw.longitude)
+                )
+            )
+        }
+
+        func mapView(_ mapView: MLNMapView, didSelect annotation: MLNAnnotation) {
+            guard let entity = annotation as? SemayMapLibreEntityAnnotation else { return }
+            switch entity.kind {
+            case .pin:
+                parent.selectedPinID = entity.entityID
+                parent.selectedBusinessID = nil
+                parent.selectedRouteID = nil
+                parent.selectedServiceID = nil
+            case .business:
+                parent.selectedPinID = nil
+                parent.selectedBusinessID = entity.entityID
+                parent.selectedRouteID = nil
+                parent.selectedServiceID = nil
+            case .route:
+                parent.selectedPinID = nil
+                parent.selectedBusinessID = nil
+                parent.selectedRouteID = entity.entityID
+                parent.selectedServiceID = nil
+            case .service:
+                parent.selectedPinID = nil
+                parent.selectedBusinessID = nil
+                parent.selectedRouteID = nil
+                parent.selectedServiceID = entity.entityID
+            }
+        }
+
+        func mapView(_ mapView: MLNMapView, annotationCanShowCallout annotation: MLNAnnotation) -> Bool {
+            true
+        }
+
+        func mapViewDidFailLoadingMap(_ mapView: MLNMapView, withError error: Error) {
+            parent.onRuntimeError("maplibre-load-failed: \(error.localizedDescription)")
+        }
+
+        func applyStyleIfNeeded(
+            on mapView: MLNMapView,
+            useOfflineTiles: Bool,
+            offlinePacks: [OfflineTilePack],
+            useOSMBaseMap: Bool
+        ) {
+            let nextURL = resolveStyleURL(
+                useOfflineTiles: useOfflineTiles,
+                offlinePacks: offlinePacks,
+                useOSMBaseMap: useOSMBaseMap
+            )
+            let nextSignature = styleKey(
+                useOfflineTiles: useOfflineTiles,
+                offlinePacks: offlinePacks,
+                useOSMBaseMap: useOSMBaseMap,
+                styleURL: nextURL
+            )
+            if styleSignature == nextSignature {
+                return
+            }
+            styleSignature = nextSignature
+            if let nextURL {
+                mapView.styleURL = nextURL
+            } else {
+                parent.onRuntimeError("maplibre-style-unavailable")
+            }
+        }
+
+        func applyZoomLimits(
+            on mapView: MLNMapView,
+            useOfflineTiles: Bool,
+            offlinePacks: [OfflineTilePack]
+        ) {
+            if useOfflineTiles, !offlinePacks.isEmpty {
+                let minZoom = offlinePacks.map(\.minZoom).min() ?? 0
+                let maxZoom = offlinePacks.map(\.maxZoom).max() ?? 16
+                mapView.minimumZoomLevel = Double(minZoom)
+                mapView.maximumZoomLevel = Double(maxZoom)
+                return
+            }
+            mapView.minimumZoomLevel = 0
+            mapView.maximumZoomLevel = 22
+        }
+
+        func resolveStyleURL(
+            useOfflineTiles: Bool,
+            offlinePacks: [OfflineTilePack],
+            useOSMBaseMap: Bool
+        ) -> URL? {
+            if useOfflineTiles {
+                guard !offlinePacks.isEmpty else {
+                    parent.onRuntimeError("maplibre-offline-pack-missing")
+                    return nil
+                }
+                do {
+                    try MapLibreRasterBridge.shared.prepare(packs: offlinePacks)
+                    guard let styleURL = MapLibreRasterBridge.shared.styleURL() else {
+                        parent.onRuntimeError("maplibre-offline-style-missing")
+                        return nil
+                    }
+                    return styleURL
+                } catch {
+                    parent.onRuntimeError("maplibre-offline-prepare-failed: \(error.localizedDescription)")
+                    return nil
+                }
+            }
+
+            _ = useOSMBaseMap
+            guard let onlineStyleURL = URL(string: "https://demotiles.maplibre.org/style.json") else {
+                parent.onRuntimeError("maplibre-online-style-invalid")
+                return nil
+            }
+            return onlineStyleURL
+        }
+
+        private func styleKey(
+            useOfflineTiles: Bool,
+            offlinePacks: [OfflineTilePack],
+            useOSMBaseMap: Bool,
+            styleURL: URL?
+        ) -> String {
+            if useOfflineTiles {
+                let packKey = offlinePacks.map(\.path).joined(separator: "|")
+                return "offline:\(packKey):\(styleURL?.absoluteString ?? "none")"
+            }
+            return "online:\(useOSMBaseMap):\(styleURL?.absoluteString ?? "none")"
+        }
+
+        func syncMapContent(
+            on mapView: MLNMapView,
+            pins: [SemayMapPin],
+            businesses: [BusinessProfile],
+            routes: [SemayCuratedRoute],
+            services: [SemayServiceDirectoryEntry]
+        ) {
+            if let annotations = mapView.annotations, !annotations.isEmpty {
+                mapView.removeAnnotations(annotations)
+            }
+
+            var next: [SemayMapLibreEntityAnnotation] = []
+            next.append(contentsOf: pins.map { pin in
+                SemayMapLibreEntityAnnotation(
+                    entityID: pin.pinID,
+                    kind: .pin,
+                    coordinate: CLLocationCoordinate2D(latitude: pin.latitude, longitude: pin.longitude),
+                    title: pin.name,
+                    subtitle: pin.type
+                )
+            })
+            next.append(contentsOf: businesses.filter { $0.latitude != 0 || $0.longitude != 0 }.map { business in
+                SemayMapLibreEntityAnnotation(
+                    entityID: business.businessID,
+                    kind: .business,
+                    coordinate: CLLocationCoordinate2D(latitude: business.latitude, longitude: business.longitude),
+                    title: business.name,
+                    subtitle: business.category
+                )
+            })
+            next.append(contentsOf: routes.compactMap { route in
+                guard let lat = route.centerLatitude, let lon = route.centerLongitude else { return nil }
+                return SemayMapLibreEntityAnnotation(
+                    entityID: route.routeID,
+                    kind: .route,
+                    coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                    title: route.title,
+                    subtitle: route.city
+                )
+            })
+            next.append(contentsOf: services.filter { $0.latitude != 0 || $0.longitude != 0 }.map { service in
+                SemayMapLibreEntityAnnotation(
+                    entityID: service.serviceID,
+                    kind: .service,
+                    coordinate: CLLocationCoordinate2D(latitude: service.latitude, longitude: service.longitude),
+                    title: service.name,
+                    subtitle: service.serviceType
+                )
+            })
+
+            if !next.isEmpty {
+                mapView.addAnnotations(next)
+            }
+        }
+    }
+}
+
+private final class SemayMapLibreEntityAnnotation: MLNPointAnnotation {
+    enum Kind {
+        case pin
+        case business
+        case route
+        case service
+    }
+
+    let entityID: String
+    let kind: Kind
+
+    init(entityID: String, kind: Kind, coordinate: CLLocationCoordinate2D, title: String, subtitle: String) {
+        self.entityID = entityID
+        self.kind = kind
+        super.init()
+        self.coordinate = coordinate
+        self.title = title
+        self.subtitle = subtitle
+    }
+}
+#else
+private struct SemayMapLibreView: View {
+    @Binding var region: MKCoordinateRegion
+    let pins: [SemayMapPin]
+    @Binding var selectedPinID: String?
+    let businesses: [BusinessProfile]
+    @Binding var selectedBusinessID: String?
+    let routes: [SemayCuratedRoute]
+    @Binding var selectedRouteID: String?
+    let services: [SemayServiceDirectoryEntry]
+    @Binding var selectedServiceID: String?
+    let offlinePacks: [OfflineTilePack]
+    let useOfflineTiles: Bool
+    @Binding var useOSMBaseMap: Bool
+    let onLongPress: (CLLocationCoordinate2D) -> Void
+    let onRuntimeError: (String) -> Void
+
+    var body: some View {
+        SemayMapKitView(
+            region: $region,
+            pins: pins,
+            selectedPinID: $selectedPinID,
+            businesses: businesses,
+            selectedBusinessID: $selectedBusinessID,
+            routes: routes,
+            selectedRouteID: $selectedRouteID,
+            services: services,
+            selectedServiceID: $selectedServiceID,
+            useOSMBaseMap: $useOSMBaseMap,
+            offlinePacks: offlinePacks,
+            useOfflineTiles: .constant(useOfflineTiles),
+            onLongPress: onLongPress
+        )
+        .onAppear {
+            onRuntimeError("maplibre-module-unavailable")
+        }
+    }
+}
+#endif
+
+private struct SemayMapKitView: UIViewRepresentable {
+    @Binding var region: MKCoordinateRegion
+    let pins: [SemayMapPin]
+    @Binding var selectedPinID: String?
+    let businesses: [BusinessProfile]
+    @Binding var selectedBusinessID: String?
+    let routes: [SemayCuratedRoute]
+    @Binding var selectedRouteID: String?
+    let services: [SemayServiceDirectoryEntry]
+    @Binding var selectedServiceID: String?
+    @Binding var useOSMBaseMap: Bool
+    let offlinePacks: [OfflineTilePack]
     @Binding var useOfflineTiles: Bool
     let onLongPress: (CLLocationCoordinate2D) -> Void
 
@@ -1130,7 +3404,7 @@ private struct SemayMapView: UIViewRepresentable {
         context.coordinator.applyBaseLayer(
             to: mapView,
             useOSM: useOSMBaseMap,
-            offlinePack: offlinePack,
+            offlinePacks: offlinePacks,
             useOfflineTiles: useOfflineTiles
         )
         return mapView
@@ -1143,10 +3417,16 @@ private struct SemayMapView: UIViewRepresentable {
         context.coordinator.applyBaseLayer(
             to: mapView,
             useOSM: useOSMBaseMap,
-            offlinePack: offlinePack,
+            offlinePacks: offlinePacks,
             useOfflineTiles: useOfflineTiles
         )
-        context.coordinator.syncAnnotations(on: mapView, pins: pins, businesses: businesses)
+        context.coordinator.syncMapContent(
+            on: mapView,
+            pins: pins,
+            businesses: businesses,
+            routes: routes,
+            services: services
+        )
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1154,14 +3434,13 @@ private struct SemayMapView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
-        private let parent: SemayMapView
+        private let parent: SemayMapKitView
         private let osmOverlay = MKTileOverlay(
             urlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         )
-        private var offlineOverlay: MBTilesOverlay?
-        private var offlineOverlayPath: String?
+        private var offlineOverlays: [String: MBTilesOverlay] = [:]
 
-        init(_ parent: SemayMapView) {
+        init(_ parent: SemayMapKitView) {
             self.parent = parent
             super.init()
             osmOverlay.canReplaceMapContent = true
@@ -1178,13 +3457,17 @@ private struct SemayMapView: UIViewRepresentable {
         func applyBaseLayer(
             to mapView: MKMapView,
             useOSM: Bool,
-            offlinePack: OfflineTilePack?,
+            offlinePacks: [OfflineTilePack],
             useOfflineTiles: Bool
         ) {
-            if useOfflineTiles, let pack = offlinePack {
-                ensureOfflineOverlay(pack: pack)
-                if let offlineOverlay, !mapView.overlays.contains(where: { $0 === offlineOverlay }) {
-                    mapView.addOverlay(offlineOverlay, level: .aboveLabels)
+            let orderedOfflinePacks = orderedPacksForOverlay(offlinePacks)
+            if useOfflineTiles, !orderedOfflinePacks.isEmpty {
+                let activePaths = Set(orderedOfflinePacks.map(\.path))
+                removeStaleOfflineOverlays(activePaths: activePaths)
+                mapView.removeOverlays(currentOfflineOverlays(in: mapView))
+                for pack in orderedOfflinePacks {
+                    let overlay = ensureOfflineOverlay(for: pack)
+                    mapView.addOverlay(overlay, level: .aboveLabels)
                 }
                 if mapView.overlays.contains(where: { $0 === osmOverlay }) {
                     mapView.removeOverlay(osmOverlay)
@@ -1202,21 +3485,49 @@ private struct SemayMapView: UIViewRepresentable {
                 mapView.removeOverlay(osmOverlay)
             }
 
-            if let offlineOverlay, mapView.overlays.contains(where: { $0 === offlineOverlay }) {
-                mapView.removeOverlay(offlineOverlay)
+            mapView.removeOverlays(currentOfflineOverlays(in: mapView))
+        }
+
+        private func orderedPacksForOverlay(_ packs: [OfflineTilePack]) -> [OfflineTilePack] {
+            packs.sorted {
+                if $0.minZoom != $1.minZoom {
+                    return $0.minZoom < $1.minZoom
+                }
+                if $0.maxZoom != $1.maxZoom {
+                    return $0.maxZoom < $1.maxZoom
+                }
+                return $0.path < $1.path
             }
         }
 
-        private func ensureOfflineOverlay(pack: OfflineTilePack) {
-            if offlineOverlayPath == pack.path, offlineOverlay != nil {
-                return
+        private func ensureOfflineOverlay(for pack: OfflineTilePack) -> MBTilesOverlay {
+            if let cached = offlineOverlays[pack.path] {
+                return cached
             }
-            offlineOverlayPath = pack.path
-            offlineOverlay = MBTilesOverlay(path: pack.path, minZoom: pack.minZoom, maxZoom: pack.maxZoom)
-            offlineOverlay?.canReplaceMapContent = true
+            let overlay = MBTilesOverlay(path: pack.path, minZoom: pack.minZoom, maxZoom: pack.maxZoom)
+            overlay.canReplaceMapContent = true
+            offlineOverlays[pack.path] = overlay
+            return overlay
         }
 
-        func syncAnnotations(on mapView: MKMapView, pins: [SemayMapPin], businesses: [BusinessProfile]) {
+        private func currentOfflineOverlays(in mapView: MKMapView) -> [MKTileOverlay] {
+            mapView.overlays.compactMap { overlay in
+                guard overlay !== osmOverlay else { return nil }
+                return overlay as? MKTileOverlay
+            }
+        }
+
+        private func removeStaleOfflineOverlays(activePaths: Set<String>) {
+            offlineOverlays = offlineOverlays.filter { activePaths.contains($0.key) }
+        }
+
+        func syncMapContent(
+            on mapView: MKMapView,
+            pins: [SemayMapPin],
+            businesses: [BusinessProfile],
+            routes: [SemayCuratedRoute],
+            services: [SemayServiceDirectoryEntry]
+        ) {
             let existingPins = mapView.annotations.compactMap { $0 as? SemayPinAnnotation }
             let existingPinIDs = Set(existingPins.map(\.pinID))
             let pinIDs = Set(pins.map(\.pinID))
@@ -1247,17 +3558,104 @@ private struct SemayMapView: UIViewRepresentable {
             if !newBusinessAnnotations.isEmpty {
                 mapView.addAnnotations(newBusinessAnnotations)
             }
+
+            syncRouteOverlays(on: mapView, routes: routes)
+            syncRouteAnchors(on: mapView, routes: routes)
+            syncServiceAnnotations(on: mapView, services: services)
+        }
+
+        private func syncRouteAnchors(on mapView: MKMapView, routes: [SemayCuratedRoute]) {
+            let existingRouteAnchors = mapView.annotations.compactMap { $0 as? SemayRouteAnchorAnnotation }
+            let existingRouteIDs = Set(existingRouteAnchors.map(\.routeID))
+            let activeRoutes = routes.filter { !$0.waypoints.isEmpty }
+            let routeIDs = Set(activeRoutes.map(\.routeID))
+
+            let stale = existingRouteAnchors.filter { !routeIDs.contains($0.routeID) }
+            if !stale.isEmpty {
+                mapView.removeAnnotations(stale)
+            }
+
+            let newAnchors = activeRoutes
+                .filter { !existingRouteIDs.contains($0.routeID) }
+                .map { SemayRouteAnchorAnnotation(route: $0) }
+            if !newAnchors.isEmpty {
+                mapView.addAnnotations(newAnchors)
+            }
+        }
+
+        private func syncRouteOverlays(on mapView: MKMapView, routes: [SemayCuratedRoute]) {
+            let existingRouteOverlays = mapView.overlays.compactMap { $0 as? SemayRoutePolyline }
+            if !existingRouteOverlays.isEmpty {
+                mapView.removeOverlays(existingRouteOverlays)
+            }
+
+            let overlays = routes.flatMap { route -> [SemayRoutePolyline] in
+                guard route.waypoints.count >= 2 else { return [] }
+                let coordinates: [CLLocationCoordinate2D] = route.waypoints.compactMap { waypoint -> CLLocationCoordinate2D? in
+                    guard CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: waypoint.latitude, longitude: waypoint.longitude)) else {
+                        return nil
+                    }
+                    return CLLocationCoordinate2D(latitude: waypoint.latitude, longitude: waypoint.longitude)
+                }
+                guard coordinates.count >= 2 else { return [] }
+                return [SemayRoutePolyline(
+                    routeID: route.routeID,
+                    transportType: route.transportType,
+                    trustScore: route.trustScore,
+                    coordinates: coordinates
+                )]
+            }
+            if !overlays.isEmpty {
+                mapView.addOverlays(overlays, level: .aboveRoads)
+            }
+        }
+
+        private func syncServiceAnnotations(on mapView: MKMapView, services: [SemayServiceDirectoryEntry]) {
+            let existingServices = mapView.annotations.compactMap { $0 as? SemayDirectoryServiceAnnotation }
+            let existingServiceIDs = Set(existingServices.map(\.serviceID))
+            let mappedServices = services.filter { $0.latitude != 0 || $0.longitude != 0 }
+            let serviceIDs = Set(mappedServices.map(\.serviceID))
+
+            let stale = existingServices.filter { !serviceIDs.contains($0.serviceID) }
+            if !stale.isEmpty {
+                mapView.removeAnnotations(stale)
+            }
+
+            let new = mappedServices
+                .filter { !existingServiceIDs.contains($0.serviceID) }
+                .map { SemayDirectoryServiceAnnotation(service: $0) }
+            if !new.isEmpty {
+                mapView.addAnnotations(new)
+            }
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             if let pin = view.annotation as? SemayPinAnnotation {
                 parent.selectedBusinessID = nil
                 parent.selectedPinID = pin.pinID
+                parent.selectedRouteID = nil
+                parent.selectedServiceID = nil
                 return
             }
             if let business = view.annotation as? SemayBusinessAnnotation {
                 parent.selectedPinID = nil
                 parent.selectedBusinessID = business.businessID
+                parent.selectedRouteID = nil
+                parent.selectedServiceID = nil
+                return
+            }
+            if let route = view.annotation as? SemayRouteAnchorAnnotation {
+                parent.selectedPinID = nil
+                parent.selectedBusinessID = nil
+                parent.selectedRouteID = route.routeID
+                parent.selectedServiceID = nil
+                return
+            }
+            if let service = view.annotation as? SemayDirectoryServiceAnnotation {
+                parent.selectedPinID = nil
+                parent.selectedBusinessID = nil
+                parent.selectedRouteID = nil
+                parent.selectedServiceID = service.serviceID
                 return
             }
         }
@@ -1268,6 +3666,12 @@ private struct SemayMapView: UIViewRepresentable {
             }
             if view.annotation is SemayBusinessAnnotation {
                 parent.selectedBusinessID = nil
+            }
+            if view.annotation is SemayRouteAnchorAnnotation {
+                parent.selectedRouteID = nil
+            }
+            if view.annotation is SemayDirectoryServiceAnnotation {
+                parent.selectedServiceID = nil
             }
         }
 
@@ -1298,6 +3702,28 @@ private struct SemayMapView: UIViewRepresentable {
                 return view
             }
 
+            if let route = annotation as? SemayRouteAnchorAnnotation {
+                let identifier = "SemayRouteAnchor"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                    as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                view.annotation = annotation
+                view.markerTintColor = routeTrustColor(route.trustScore)
+                view.glyphImage = UIImage(systemName: routeTransportGlyph(route.transportType))
+                view.canShowCallout = true
+                return view
+            }
+
+            if let service = annotation as? SemayDirectoryServiceAnnotation {
+                let identifier = "SemayDirectoryService"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                    as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                view.annotation = annotation
+                view.markerTintColor = service.verified ? .systemGreen : .systemTeal
+                view.glyphImage = UIImage(systemName: "person.2.wave.2")
+                view.canShowCallout = true
+                return view
+            }
+
             return nil
         }
 
@@ -1305,7 +3731,57 @@ private struct SemayMapView: UIViewRepresentable {
             if let tileOverlay = overlay as? MKTileOverlay {
                 return MKTileOverlayRenderer(tileOverlay: tileOverlay)
             }
+            if let routeOverlay = overlay as? SemayRoutePolyline {
+                let renderer = MKPolylineRenderer(polyline: routeOverlay)
+                let selected = routeOverlay.routeID == parent.selectedRouteID
+                renderer.strokeColor = routeTraceColor(
+                    trustScore: routeOverlay.trustScore,
+                    selected: selected
+                )
+                renderer.lineWidth = selected ? 7 : 5
+                renderer.lineCap = .round
+                renderer.lineJoin = .round
+                return renderer
+            }
             return MKOverlayRenderer(overlay: overlay)
+        }
+
+        private func routeTrustColor(_ score: Int) -> UIColor {
+            switch score {
+            case 80...:
+                return .systemGreen
+            case 60...79:
+                return .systemBlue
+            case 40...59:
+                return .systemOrange
+            default:
+                return .systemRed
+            }
+        }
+
+        private func routeTraceColor(trustScore: Int, selected: Bool) -> UIColor {
+            let base = routeTrustColor(trustScore)
+            return selected ? base : base.withAlphaComponent(0.8)
+        }
+
+        private func routeTransportGlyph(_ raw: String) -> String {
+            let transport = SemayRouteTransport(rawValue: raw.lowercased()) ?? .unknown
+            switch transport {
+            case .walk:
+                return "figure.walk"
+            case .bus:
+                return "bus"
+            case .taxi:
+                return "car.front.wheels"
+            case .car:
+                return "car.fill"
+            case .train:
+                return "tram.fill"
+            case .mixed:
+                return "arrow.triangle.branch"
+            case .unknown:
+                return "map"
+            }
         }
 
         func isRegionSimilar(_ lhs: MKCoordinateRegion, _ rhs: MKCoordinateRegion) -> Bool {
@@ -1347,6 +3823,57 @@ private final class SemayBusinessAnnotation: NSObject, MKAnnotation {
         self.title = business.name
         self.subtitle = business.category
         super.init()
+    }
+}
+
+private final class SemayRouteAnchorAnnotation: NSObject, MKAnnotation {
+    let routeID: String
+    let transportType: String
+    let trustScore: Int
+    let coordinate: CLLocationCoordinate2D
+    let title: String?
+    let subtitle: String?
+
+    init(route: SemayCuratedRoute) {
+        self.routeID = route.routeID
+        self.transportType = route.transportType
+        self.trustScore = route.trustScore
+        let center = route.centerLatitude ?? 15.3229
+        let point = route.centerLongitude ?? 38.9251
+        self.coordinate = CLLocationCoordinate2D(latitude: center, longitude: point)
+        self.title = route.title
+        self.subtitle = "\(route.city) • \(route.fromLabel) → \(route.toLabel)"
+        super.init()
+    }
+}
+
+private final class SemayDirectoryServiceAnnotation: NSObject, MKAnnotation {
+    let serviceID: String
+    let verified: Bool
+    let coordinate: CLLocationCoordinate2D
+    let title: String?
+    let subtitle: String?
+
+    init(service: SemayServiceDirectoryEntry) {
+        self.serviceID = service.serviceID
+        self.verified = service.verified
+        self.coordinate = CLLocationCoordinate2D(latitude: service.latitude, longitude: service.longitude)
+        self.title = service.name
+        self.subtitle = "\(service.serviceType) • \(service.city)"
+        super.init()
+    }
+}
+
+private final class SemayRoutePolyline: MKPolyline {
+    let routeID: String
+    let transportType: String
+    let trustScore: Int
+
+    init(routeID: String, transportType: String, trustScore: Int, coordinates: [CLLocationCoordinate2D]) {
+        self.routeID = routeID
+        self.transportType = transportType
+        self.trustScore = trustScore
+        super.init(coordinates: coordinates, count: coordinates.count)
     }
 }
 
@@ -1453,10 +3980,14 @@ private struct SemayExploreSheet: View {
     @Binding var region: MKCoordinateRegion
     let pins: [SemayMapPin]
     let businesses: [BusinessProfile]
+    let routes: [SemayCuratedRoute]
+    let services: [SemayServiceDirectoryEntry]
     let bulletins: [BulletinPost]
     @ObservedObject var libraryStore: LibraryPackStore
     @Binding var selectedPinID: String?
     @Binding var selectedBusinessID: String?
+    @Binding var selectedRouteID: String?
+    @Binding var selectedServiceID: String?
     @StateObject private var reachability = NetworkReachabilityService.shared
 
     @State private var query: String = ""
@@ -1466,13 +3997,21 @@ private struct SemayExploreSheet: View {
     @State private var readerItem: SemayLibraryItem?
     @State private var showBulletinComposer = false
     @State private var bulletinActionMessage: String?
+    @State private var exploreActionMessage: String?
+    @State private var routeCityFilter: String = "All"
+    @State private var serviceCityFilter: String = "All"
+    @State private var serviceTypeFilter: String = "All"
+    @State private var serviceUrgencyFilter: String = "All"
+    @State private var verifiedServiceOnly = false
+    @State private var bulletinCategoryFilter: String = "All"
 
     private enum Segment: String, CaseIterable, Identifiable {
         case places = "Places"
         case businesses = "Businesses"
+        case routes = "Routes"
         case bulletins = "Bulletins"
         case library = "Library"
-        case routes = "Routes"
+        case services = "Services"
 
         var id: String { rawValue }
     }
@@ -1481,7 +4020,7 @@ private struct SemayExploreSheet: View {
         NavigationStack {
             VStack(spacing: 12) {
                 VStack(spacing: 10) {
-                    TextField("Search places, businesses, bulletins, plus code, or E-address", text: $query)
+                    TextField("Search places, businesses, routes, services, plus codes, or E-address", text: $query)
                         .textFieldStyle(.roundedBorder)
                         .semayDisableAutoCaps()
                         .semayDisableAutocorrection()
@@ -1502,6 +4041,8 @@ private struct SemayExploreSheet: View {
                             Button {
                                 selectedPinID = nil
                                 selectedBusinessID = nil
+                                selectedRouteID = nil
+                                selectedServiceID = nil
                                 focus(area: jump.area)
                                 isPresented = false
                             } label: {
@@ -1523,15 +4064,14 @@ private struct SemayExploreSheet: View {
                         placesSection
                     case .businesses:
                         businessesSection
+                    case .routes:
+                        routesSection
                     case .bulletins:
                         bulletinsSection
                     case .library:
                         librarySection
-                    case .routes:
-                        Section {
-                            Text("Curated routes coming soon.")
-                                .foregroundStyle(.secondary)
-                        }
+                    case .services:
+                        servicesSection
                     }
                 }
                 .listStyle(.plain)
@@ -1549,7 +4089,17 @@ private struct SemayExploreSheet: View {
                 SemayBulletinComposerSheet(isPresented: $showBulletinComposer)
                     .environmentObject(dataStore)
             }
-            .alert("Bulletins", isPresented: Binding(
+            .alert("Explore", isPresented: Binding(
+                get: { exploreActionMessage != nil },
+                set: { if !$0 { exploreActionMessage = nil } }
+            )) {
+                Button("OK") { exploreActionMessage = nil }
+            } message: {
+                if let exploreActionMessage {
+                    Text(exploreActionMessage)
+                }
+            }
+            .alert("Explore", isPresented: Binding(
                 get: { bulletinActionMessage != nil },
                 set: { if !$0 { bulletinActionMessage = nil } }
             )) {
@@ -1566,6 +4116,10 @@ private struct SemayExploreSheet: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    private var searchQueryVariants: Set<String> {
+        searchVariants(for: normalizedQuery)
+    }
+
     private var plusCodeJump: (code: String, area: OpenLocationCode.Area)? {
         let raw = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return nil }
@@ -1575,41 +4129,490 @@ private struct SemayExploreSheet: View {
         return (canonical, area)
     }
 
+    private var routeCityOptions: [String] {
+        let cities = Set(routes.compactMap { $0.city.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty })
+        return ["All"] + cities.sorted().map { $0.capitalized }
+    }
+
+    private var serviceCityOptions: [String] {
+        let cities = Set(
+            services.compactMap { service in
+                let city = service.city.trimmingCharacters(in: .whitespacesAndNewlines)
+                let country = service.country.trimmingCharacters(in: .whitespacesAndNewlines)
+                let key = [city, country].filter { !$0.isEmpty }.joined(separator: ",")
+                return key.isEmpty ? nil : key.lowercased()
+            }
+        )
+        return ["All"] + cities.sorted().map { $0.capitalized }
+    }
+
+    private var serviceTypeOptions: [String] {
+        let types = Set(services.map { $0.serviceType.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        return ["All"] + types.sorted().map { $0.capitalized }
+    }
+
+    private var urgencyOptions: [String] {
+        ["All"] + Set(services.compactMap { service in
+            let raw = service.urgency.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            return raw.isEmpty ? nil : raw.capitalized
+        }).sorted()
+    }
+
+    private var bulletinCategoryOptions: [String] {
+        let categories = Set(bulletins.map { $0.category.title })
+        return ["All"] + categories.sorted()
+    }
+
     private var filteredPins: [SemayMapPin] {
-        let q = normalizedQuery
-        if q.isEmpty { return pins }
+        let queryVariants = searchQueryVariants
+        if queryVariants.isEmpty { return pins }
         return pins.filter { pin in
-            pin.name.lowercased().contains(q)
-                || pin.type.lowercased().contains(q)
-                || pin.details.lowercased().contains(q)
-                || pin.eAddress.lowercased().contains(q)
-                || pin.plusCode.lowercased().contains(q)
+            return hasQueryMatch(
+                textFields: [
+                    pin.name,
+                    pin.type,
+                    pin.details,
+                    pin.eAddress,
+                    pin.plusCode
+                ],
+                queryVariants: queryVariants
+            )
         }
     }
 
     private var filteredBusinesses: [BusinessProfile] {
-        let q = normalizedQuery
-        if q.isEmpty { return businesses }
+        let queryVariants = searchQueryVariants
+        if queryVariants.isEmpty { return businesses }
         return businesses.filter { b in
-            b.name.lowercased().contains(q)
-                || b.category.lowercased().contains(q)
-                || b.details.lowercased().contains(q)
-                || b.eAddress.lowercased().contains(q)
-                || b.plusCode.lowercased().contains(q)
-                || b.phone.lowercased().contains(q)
+            hasQueryMatch(
+                textFields: [
+                    b.name,
+                    b.category,
+                    b.details,
+                    b.eAddress,
+                    b.plusCode,
+                    b.phone
+                ],
+                queryVariants: queryVariants
+            )
         }
     }
 
     private var filteredBulletins: [BulletinPost] {
-        let q = normalizedQuery
-        if q.isEmpty { return bulletins }
-        return bulletins.filter { item in
-            item.title.lowercased().contains(q)
-                || item.body.lowercased().contains(q)
-                || item.category.rawValue.lowercased().contains(q)
-                || item.plusCode.lowercased().contains(q)
-                || item.eAddress.lowercased().contains(q)
-                || item.phone.lowercased().contains(q)
+        let queryVariants = searchQueryVariants
+        var result = bulletins
+
+        if !queryVariants.isEmpty {
+            result = result.filter { item in
+                hasQueryMatch(
+                    textFields: [
+                        item.title,
+                        item.body,
+                        item.category.rawValue,
+                        item.plusCode,
+                        item.eAddress,
+                        item.phone
+                    ],
+                    queryVariants: queryVariants
+                )
+            }
+        }
+
+        if bulletinCategoryFilter != "All" {
+            result = result.filter { $0.category.title == bulletinCategoryFilter }
+        }
+
+        return result.sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.createdAt > $1.createdAt
+        }
+    }
+
+    private func routeSearchMatches(_ route: SemayCuratedRoute, queryVariants: Set<String>) -> Bool {
+        hasQueryMatch(
+            textFields: [
+                route.title,
+                route.summary,
+                route.city,
+                route.fromLabel,
+                route.toLabel,
+                route.transportType
+            ],
+            queryVariants: queryVariants
+        )
+    }
+
+    private func serviceSearchMatches(_ entry: SemayServiceDirectoryEntry, queryVariants: Set<String>) -> Bool {
+        hasQueryMatch(
+            textFields: [
+                entry.name,
+                entry.serviceType,
+                entry.category,
+                entry.details,
+                entry.city,
+                entry.country,
+                entry.addressLabel,
+                entry.locality,
+                entry.adminArea,
+                entry.countryCode,
+                entry.plusCode,
+                entry.eAddress,
+                entry.phone,
+                entry.website
+            ],
+            queryVariants: queryVariants
+        )
+    }
+
+    private func hasQueryMatch(textFields: [String], queryVariants: Set<String>) -> Bool {
+        if queryVariants.isEmpty { return true }
+        return textFields.contains { field in
+            let fieldVariants = searchVariants(for: field)
+            return queryVariants.contains { query in
+                fieldVariants.contains(where: { $0.contains(query) })
+            }
+        }
+    }
+
+    private func searchVariants(for rawText: String) -> Set<String> {
+        let normalized = normalizeSearchText(rawText)
+        if normalized.isEmpty { return [] }
+
+        var variants = Set<String>()
+        variants.insert(normalized)
+        variants.insert(removeSearchSeparators(normalized))
+
+        let transliterated = transliterateEthiopic(for: rawText)
+        let transliteratedNormalized = normalizeSearchText(transliterated)
+        if !transliteratedNormalized.isEmpty {
+            variants.insert(transliteratedNormalized)
+            variants.insert(removeSearchSeparators(transliteratedNormalized))
+        }
+
+        return variants
+    }
+
+    private func normalizeSearchText(_ rawText: String) -> String {
+        let folded = rawText
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+        let allowed = CharacterSet.alphanumerics
+            .union(.whitespaces)
+            .union(CharacterSet(charactersIn: "+-#"))
+        let compact = String(folded.unicodeScalars.filter { scalar in
+            allowed.contains(scalar)
+        })
+        return compact
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func removeSearchSeparators(_ text: String) -> String {
+        text.replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "#", with: "")
+    }
+
+    private func transliterateEthiopic(for text: String) -> String {
+        let map: [Character: String] = [
+            "ሀ": "ha", "ሁ": "hu", "ሂ": "hi", "ሃ": "ha", "ሄ": "he", "ህ": "he", "ሆ": "ho",
+            "ለ": "le", "ሉ": "lu", "ሊ": "li", "ላ": "la", "ሌ": "le", "ል": "li", "ሎ": "lo",
+            "ሐ": "ha", "ሑ": "hu", "ሒ": "hi", "ሓ": "ha", "ሔ": "he", "ሕ": "he", "ሖ": "ho",
+            "መ": "me", "ሙ": "mu", "ሚ": "mi", "ማ": "ma", "ሜ": "me", "ም": "mi", "ሞ": "mo",
+            "ሠ": "se", "ሡ": "su", "ሢ": "si", "ሣ": "sa", "ሤ": "se", "ሥ": "si", "ሦ": "so",
+            "ረ": "re", "ሩ": "ru", "ሪ": "ri", "ራ": "ra", "ሬ": "re", "ር": "ri", "ሮ": "ro",
+            "ሰ": "se", "ሱ": "su", "ሲ": "si", "ሳ": "sa", "ሴ": "se", "ስ": "si", "ሶ": "so",
+            "ሸ": "she", "ሹ": "shu", "ሺ": "shi", "ሻ": "sha", "ሼ": "she", "ሽ": "shi", "ሾ": "sho",
+            "ቀ": "qe", "ቁ": "qu", "ቂ": "qi", "ቃ": "qa", "ቄ": "qe", "ቅ": "qi", "ቆ": "qo",
+            "ቈ": "qwa", "ቊ": "qwu", "ቋ": "qwi", "ቌ": "qwe", "ቍ": "qwi",
+            "በ": "be", "ቡ": "bu", "ቢ": "bi", "ባ": "ba", "ቤ": "be", "ብ": "bi", "ቦ": "bo",
+            "ቨ": "ve", "ቩ": "vu", "ቪ": "vi", "ቫ": "va", "ቬ": "ve", "ቭ": "vi", "ቮ": "vo",
+            "ተ": "te", "ቱ": "tu", "ቲ": "ti", "ታ": "ta", "ቴ": "te", "ት": "ti", "ቶ": "to",
+            "ቸ": "che", "ቹ": "chu", "ቺ": "chi", "ቻ": "cha", "ቼ": "che", "ች": "chi", "ቾ": "cho",
+            "ኀ": "ha", "ኁ": "hu", "ኂ": "hi", "ኃ": "ha", "ኄ": "he", "ኅ": "he", "ኆ": "ho",
+            "ነ": "ne", "ኑ": "nu", "ኒ": "ni", "ና": "na", "ኔ": "ne", "ን": "ni", "ኖ": "no",
+            "አ": "a", "ኡ": "u", "ኢ": "i", "ኣ": "a", "ኤ": "e", "እ": "e", "ኦ": "o",
+            "ከ": "ke", "ኩ": "ku", "ኪ": "ki", "ካ": "ka", "ኬ": "ke", "ክ": "ki", "ኮ": "ko",
+            "ወ": "we", "ዉ": "wu", "ዊ": "wi", "ዋ": "wa", "ዌ": "we", "ው": "wi", "ዎ": "wo",
+            "ዐ": "a", "ዑ": "u", "ዒ": "i", "ዓ": "a", "ዔ": "e", "ዕ": "e", "ዖ": "o",
+            "ዘ": "ze", "ዙ": "zu", "ዚ": "zi", "ዛ": "za", "ዜ": "ze", "ዝ": "zi", "ዞ": "zo",
+            "ዠ": "zhe", "ዡ": "zhu", "ዢ": "zhi", "ዣ": "zha", "ዤ": "zhe", "ዥ": "zhi", "ዦ": "zho",
+            "የ": "ye", "ዩ": "yu", "ዪ": "yi", "ያ": "ya", "ዬ": "ye", "ይ": "yi", "ዮ": "yo",
+            "ደ": "de", "ዱ": "du", "ዲ": "di", "ዳ": "da", "ዴ": "de", "ድ": "di", "ዶ": "do",
+            "ገ": "ge", "ጉ": "gu", "ጊ": "gi", "ጋ": "ga", "ጌ": "ge", "ግ": "gi", "ጎ": "go",
+            "ጠ": "te", "ጡ": "tu", "ጢ": "ti", "ጣ": "ta", "ጤ": "te", "ጥ": "ti", "ጦ": "to",
+            "ጨ": "che", "ጩ": "chu", "ጪ": "chi", "ጫ": "cha", "ጬ": "che", "ጭ": "chi", "ጮ": "cho",
+            "ጰ": "pe", "ጱ": "pu", "ጲ": "pi", "ጳ": "pa", "ጴ": "pe", "ጵ": "pi", "ጶ": "po",
+            "ጸ": "tse", "ጹ": "tsu", "ጺ": "tsi", "ጻ": "tsa", "ጼ": "tse", "ጽ": "tsi", "ጾ": "tso",
+            "ፈ": "fe", "ፉ": "fu", "ፊ": "fi", "ፋ": "fa", "ፌ": "fe", "ፍ": "fi", "ፎ": "fo"
+        ]
+
+        return text.reduce(into: "") { result, ch in
+            result.append(map[ch] ?? String(ch))
+        }
+    }
+
+    private var filteredRoutes: [SemayCuratedRoute] {
+        let queryVariants = searchQueryVariants
+        var result = routes
+
+        if !queryVariants.isEmpty {
+            result = result.filter { route in
+                routeSearchMatches(route, queryVariants: queryVariants)
+            }
+        }
+        if routeCityFilter != "All" {
+            result = result.filter { $0.city.lowercased() == routeCityFilter.lowercased() }
+        }
+
+        return result.sorted {
+            if $0.trustScore != $1.trustScore {
+                return $0.trustScore > $1.trustScore
+            }
+            return $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    private var filteredServices: [SemayServiceDirectoryEntry] {
+        let queryVariants = searchQueryVariants
+        var result = services
+
+        if !queryVariants.isEmpty {
+            result = result.filter { entry in
+                serviceSearchMatches(entry, queryVariants: queryVariants)
+            }
+        }
+
+        if serviceCityFilter != "All" {
+            result = result.filter {
+                let current = [$0.city, $0.country].map { $0.lowercased() }.filter { !$0.isEmpty }
+                let normalizedFilter = serviceCityFilter.lowercased()
+                return current.contains(normalizedFilter) || "\(current.joined(separator: ","))".contains(normalizedFilter)
+            }
+        }
+
+        if serviceTypeFilter != "All" {
+            result = result.filter { $0.serviceType.lowercased() == serviceTypeFilter.lowercased() }
+        }
+
+        if serviceUrgencyFilter != "All" {
+            result = result.filter { $0.urgency.lowercased() == serviceUrgencyFilter.lowercased() }
+        }
+
+        if verifiedServiceOnly {
+            result = result.filter(\.verified)
+        }
+
+        return result.sorted {
+            if $0.trustScore != $1.trustScore {
+                return $0.trustScore > $1.trustScore
+            }
+            return $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    private func routeTransportLabel(_ raw: String) -> String {
+        let transport = SemayRouteTransport(rawValue: raw.lowercased()) ?? .unknown
+        return transport.title
+    }
+
+    @ViewBuilder
+    private var routesSection: some View {
+        Section {
+            if routeCityOptions.count > 1 {
+                Picker("City", selection: $routeCityFilter) {
+                    ForEach(routeCityOptions, id: \.self) { city in
+                        Text(city).tag(city)
+                    }
+                }
+                .pickerStyle(.menu)
+                .padding(.vertical, 6)
+            }
+
+            if filteredRoutes.isEmpty {
+                Text("No routes match your search.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(filteredRoutes) { route in
+                    Button {
+                        selectedBusinessID = nil
+                        selectedPinID = nil
+                        selectedServiceID = nil
+                        selectedRouteID = route.routeID
+                        if let first = route.waypoints.first {
+                            focus(latitude: first.latitude, longitude: first.longitude)
+                        }
+                        isPresented = false
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(route.title)
+                                    .font(.headline)
+                                Spacer()
+                                Text(route.trustBadge)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text("Route • \(routeTransportLabel(route.transportType)) • \(route.city)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if !route.summary.isEmpty {
+                                Text(route.summary)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                    .contextMenu {
+                        Button("Endorse as Safe") {
+                            let trusted = dataStore.endorseCuratedRoute(routeID: route.routeID, score: 1, reason: "verified")
+                            exploreActionMessage = trusted
+                                ? "Route endorsed as a safer option."
+                                : "Could not save endorsement right now."
+                        }
+                        Button("Report", role: .destructive) {
+                            dataStore.reportCuratedRoute(routeID: route.routeID, reason: "mismatch")
+                            exploreActionMessage = "Route report submitted."
+                        }
+                        if dataStore.currentUserPubkey() == route.authorPubkey.lowercased() {
+                            Button("Retract", role: .destructive) {
+                                dataStore.retractCuratedRoute(routeID: route.routeID)
+                                selectedRouteID = nil
+                                exploreActionMessage = "Route marked retracted."
+                            }
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Curated Routes")
+        } footer: {
+            Text("Trust-aware routes for transit and safer transit options.")
+        }
+    }
+
+    @ViewBuilder
+    private var servicesSection: some View {
+        Section {
+            if serviceTypeOptions.count > 1 {
+                Picker("Service Type", selection: $serviceTypeFilter) {
+                    ForEach(serviceTypeOptions, id: \.self) { value in
+                        Text(value).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            if urgencyOptions.count > 1 {
+                Picker("Urgency", selection: $serviceUrgencyFilter) {
+                    ForEach(urgencyOptions, id: \.self) { value in
+                        Text(value).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            if serviceCityOptions.count > 1 {
+                Picker("Area", selection: $serviceCityFilter) {
+                    ForEach(serviceCityOptions, id: \.self) { value in
+                        Text(value).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            Toggle("Only verified services", isOn: $verifiedServiceOnly)
+
+            if filteredServices.isEmpty {
+                Text("No services match your search.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(filteredServices) { service in
+                    Button {
+                        selectedBusinessID = nil
+                        selectedPinID = nil
+                        selectedRouteID = nil
+                        selectedServiceID = service.serviceID
+                        if service.latitude != 0 || service.longitude != 0 {
+                            focus(latitude: service.latitude, longitude: service.longitude)
+                        }
+                        isPresented = false
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(service.name)
+                                    .font(.headline)
+                                Spacer()
+                                if service.verified {
+                                    Text("Verified")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.green.opacity(0.16), in: Capsule())
+                                }
+                            }
+                            Text("\(service.serviceType) • \(service.city)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if !service.addressLabel.isEmpty {
+                                Text(service.addressLabel)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Text(service.trustBadge)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if !service.details.isEmpty {
+                                Text(service.details)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                    .contextMenu {
+                        Button("Endorse") {
+                            let trusted = dataStore.endorseServiceDirectoryEntry(serviceID: service.serviceID, score: 1, reason: "verified")
+                            exploreActionMessage = trusted
+                                ? "Service endorsed."
+                                : "Could not save endorsement right now."
+                        }
+                        if dataStore.currentUserPubkey() == service.authorPubkey.lowercased() {
+                            Button("Keep Personal") {
+                                dataStore.setServiceContributionScope(serviceID: service.serviceID, scope: .personal)
+                                exploreActionMessage = "Listing is now personal-only."
+                            }
+                            Button("Share to Network") {
+                                let result = dataStore.requestNetworkShareForService(serviceID: service.serviceID)
+                                if result.accepted {
+                                    exploreActionMessage = "Listing queued for network sharing."
+                                } else if result.reasons.isEmpty {
+                                    exploreActionMessage = "Share request was blocked by quality checks."
+                                } else {
+                                    exploreActionMessage = "Share request blocked: \(result.reasons.joined(separator: ", "))."
+                                }
+                            }
+                        }
+                        Button("Report", role: .destructive) {
+                            dataStore.reportServiceDirectoryEntry(serviceID: service.serviceID, reason: "mismatch")
+                            exploreActionMessage = "Service report submitted."
+                        }
+                        if dataStore.currentUserPubkey() == service.authorPubkey.lowercased() {
+                            Button("Retract", role: .destructive) {
+                                dataStore.retractServiceDirectoryEntry(serviceID: service.serviceID)
+                                selectedServiceID = nil
+                                exploreActionMessage = "Service marked retracted."
+                            }
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Service Directory")
+        } footer: {
+            Text("Community directory with trust indicators and verified tags.")
         }
     }
 
@@ -1623,7 +4626,13 @@ private struct SemayExploreSheet: View {
                 ForEach(filteredPins) { pin in
                     Button {
                         selectedBusinessID = nil
-                        selectedPinID = pin.pinID
+                        if let linkedID = dataStore.linkedServiceID(entityType: "pin", entityID: pin.pinID) {
+                            selectedServiceID = linkedID
+                            selectedPinID = nil
+                        } else {
+                            selectedPinID = pin.pinID
+                            selectedServiceID = nil
+                        }
                         focus(latitude: pin.latitude, longitude: pin.longitude)
                         isPresented = false
                     } label: {
@@ -1657,7 +4666,13 @@ private struct SemayExploreSheet: View {
                 ForEach(filteredBusinesses) { business in
                     Button {
                         selectedPinID = nil
-                        selectedBusinessID = business.businessID
+                        if let linkedID = dataStore.linkedServiceID(entityType: "business", entityID: business.businessID) {
+                            selectedServiceID = linkedID
+                            selectedBusinessID = nil
+                        } else {
+                            selectedBusinessID = business.businessID
+                            selectedServiceID = nil
+                        }
                         if business.latitude != 0 || business.longitude != 0 {
                             focus(latitude: business.latitude, longitude: business.longitude)
                         }
@@ -1695,6 +4710,15 @@ private struct SemayExploreSheet: View {
                 showBulletinComposer = true
             } label: {
                 Label("Post Bulletin", systemImage: "plus.bubble")
+            }
+
+            if bulletinCategoryOptions.count > 1 {
+                Picker("Category", selection: $bulletinCategoryFilter) {
+                    ForEach(bulletinCategoryOptions, id: \.self) { value in
+                        Text(value).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
             }
 
             if filteredBulletins.isEmpty {
@@ -2339,6 +5363,7 @@ private struct SemayBusinessTabView: View {
             openURL(url)
         }
     }
+
 }
 
 private struct SemayBusinessQRSheet: View {
@@ -2400,16 +5425,39 @@ private struct BusinessEditorSheet: View {
     let existingBusiness: BusinessProfile?
     @StateObject private var locationState = LocationStateManager.shared
 
-	    @State private var name = ""
-	    @State private var category = "shop"
-	    @State private var details = ""
-	    @State private var phone = ""
-	    @State private var lightningLink = ""
-	    @State private var cashuLink = ""
-	    @State private var latitude = "15.3229"
-	    @State private var longitude = "38.9251"
-	    @State private var error: String?
-	    @State private var showCoordinateEditor = false
+    private struct PendingBusinessPhoto: Identifiable {
+        let id: String
+        let imageData: Data
+        let exifLatitude: Double?
+        let exifLongitude: Double?
+        let geoSource: String
+    }
+
+    private struct PendingPhotoDraft {
+        let imageData: Data
+        let coordinate: CLLocationCoordinate2D
+    }
+
+    @State private var name = ""
+    @State private var category = "shop"
+    @State private var details = ""
+    @State private var phone = ""
+    @State private var lightningLink = ""
+    @State private var cashuLink = ""
+    @State private var latitude = "15.3229"
+    @State private var longitude = "38.9251"
+    @State private var error: String?
+    @State private var showCoordinateEditor = false
+    @State private var existingPhotoRefs: [SemayServicePhotoRef] = []
+    @State private var pendingPhotos: [PendingBusinessPhoto] = []
+    @State private var selectedPrimaryPhotoID = ""
+    @State private var pendingPhotoDraft: PendingPhotoDraft?
+    @State private var showPhotoLocationPrompt = false
+    @State private var resolvedServiceID: String?
+    #if os(iOS)
+    @State private var showImagePicker = false
+    @State private var imagePickerSourceType: UIImagePickerController.SourceType = .photoLibrary
+    #endif
 
     private var parsedCoordinate: CLLocationCoordinate2D? {
         guard let lat = Double(latitude), let lon = Double(longitude) else { return nil }
@@ -2422,25 +5470,127 @@ private struct BusinessEditorSheet: View {
         return (a.plusCode, a.eAddress)
     }
 
+    private var totalPhotoCount: Int {
+        existingPhotoRefs.count + pendingPhotos.count
+    }
+
+    private var canAddPhoto: Bool {
+        totalPhotoCount < 3
+    }
+
     var body: some View {
         NavigationStack {
-	            Form {
-	                TextField("Business Name", text: $name)
-	                TextField("Category", text: $category)
-	                TextField("Description", text: $details)
-	                TextField("Phone (Optional)", text: $phone)
-	                    .semayPhoneKeyboard()
+            Form {
+                TextField("Business Name", text: $name)
+                TextField("Category", text: $category)
+                TextField("Description", text: $details)
+                TextField("Phone (Optional)", text: $phone)
+                    .semayPhoneKeyboard()
 
-	                Section("Payments (Optional)") {
-	                    TextField("Lightning (e.g., lightning:...)", text: $lightningLink)
-	                        .semayDisableAutoCaps()
-	                        .semayDisableAutocorrection()
-	                    TextField("Cashu (optional)", text: $cashuLink)
-	                        .semayDisableAutoCaps()
-	                        .semayDisableAutocorrection()
-	                }
-	
-	                Section("Location") {
+                Section("Payments (Optional)") {
+                    TextField("Lightning (e.g., lightning:...)", text: $lightningLink)
+                        .semayDisableAutoCaps()
+                        .semayDisableAutocorrection()
+                    TextField("Cashu (optional)", text: $cashuLink)
+                        .semayDisableAutoCaps()
+                        .semayDisableAutocorrection()
+                }
+
+                Section("Photos") {
+                    if existingPhotoRefs.isEmpty && pendingPhotos.isEmpty {
+                        Text("No photos yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(existingPhotoRefs) { ref in
+                            HStack(spacing: 10) {
+                                businessPhotoThumbnail(serviceID: ref.serviceID, photoID: ref.photoID, pendingData: nil)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(ref.remoteURL == nil ? "Local photo" : "Photo metadata only")
+                                        .font(.caption)
+                                    Text("Updated \(Date(timeIntervalSince1970: TimeInterval(ref.updatedAt)).formatted(date: .abbreviated, time: .omitted))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button(selectedPrimaryPhotoID == ref.photoID ? "Primary" : "Set Primary") {
+                                    selectedPrimaryPhotoID = ref.photoID
+                                }
+                                .buttonStyle(.bordered)
+                                Button("Remove", role: .destructive) {
+                                    dataStore.removeServicePhotoRef(
+                                        serviceID: ref.serviceID,
+                                        photoID: ref.photoID,
+                                        emitServiceUpdate: true
+                                    )
+                                    existingPhotoRefs = dataStore.servicePhotoRefs(serviceID: ref.serviceID)
+                                    if selectedPrimaryPhotoID == ref.photoID {
+                                        selectedPrimaryPhotoID = existingPhotoRefs.first(where: { $0.primary })?.photoID
+                                            ?? existingPhotoRefs.first?.photoID
+                                            ?? pendingPhotos.first?.id
+                                            ?? ""
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+
+                        ForEach(pendingPhotos) { photo in
+                            HStack(spacing: 10) {
+                                businessPhotoThumbnail(serviceID: nil, photoID: nil, pendingData: photo.imageData)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Pending photo")
+                                        .font(.caption)
+                                    Text(photo.geoSource == "exif_confirmed" ? "Using photo location" : "Using current/manual location")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button(selectedPrimaryPhotoID == photo.id ? "Primary" : "Set Primary") {
+                                    selectedPrimaryPhotoID = photo.id
+                                }
+                                .buttonStyle(.bordered)
+                                Button("Remove", role: .destructive) {
+                                    pendingPhotos.removeAll { $0.id == photo.id }
+                                    if selectedPrimaryPhotoID == photo.id {
+                                        selectedPrimaryPhotoID = existingPhotoRefs.first(where: { $0.primary })?.photoID
+                                            ?? existingPhotoRefs.first?.photoID
+                                            ?? pendingPhotos.first?.id
+                                            ?? ""
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+
+                    #if os(iOS)
+                    HStack {
+                        Button("Choose Photo") {
+                            imagePickerSourceType = .photoLibrary
+                            showImagePicker = true
+                        }
+                        .disabled(!canAddPhoto)
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Take Photo") {
+                            imagePickerSourceType = .camera
+                            showImagePicker = true
+                        }
+                        .disabled(!canAddPhoto || !UIImagePickerController.isSourceTypeAvailable(.camera))
+                        .buttonStyle(.bordered)
+                    }
+                    #else
+                    Text("Photo evidence is currently available on iOS.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    #endif
+                    Text("Up to 3 photos per listing. Photos stay local unless you choose to share metadata.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Location") {
                     if let coord = parsedCoordinate {
                         Text(String(format: "Lat %.6f, Lon %.6f", coord.latitude, coord.longitude))
                             .font(.caption)
@@ -2502,71 +5652,260 @@ private struct BusinessEditorSheet: View {
                             return
                         }
 
-	                        if let existingBusiness {
-	                            let updated = dataStore.updateBusiness(
-	                                businessID: existingBusiness.businessID,
-	                                name: name,
-	                                category: category,
-	                                details: details,
-	                                latitude: coord.latitude,
-	                                longitude: coord.longitude,
-	                                phone: phone,
-	                                lightningLink: lightningLink,
-	                                cashuLink: cashuLink
-	                            )
-	                            if updated == nil {
-	                                error = "Only the business owner can update this profile right now."
-	                                return
-	                            }
+                        if let existingBusiness {
+                            let updated = dataStore.updateBusiness(
+                                businessID: existingBusiness.businessID,
+                                name: name,
+                                category: category,
+                                details: details,
+                                latitude: coord.latitude,
+                                longitude: coord.longitude,
+                                phone: phone,
+                                lightningLink: lightningLink,
+                                cashuLink: cashuLink
+                            )
+                            if updated == nil {
+                                error = "Only the business owner can update this profile right now."
+                                return
+                            }
+                            persistPhotosAfterSave(businessID: existingBusiness.businessID)
                             dismiss()
                             return
                         }
 
-	                        _ = dataStore.registerBusiness(
-	                            name: name,
-	                            category: category,
-	                            details: details,
-	                            latitude: coord.latitude,
-	                            longitude: coord.longitude,
-	                            phone: phone,
-	                            lightningLink: lightningLink,
-	                            cashuLink: cashuLink
-	                        )
-	                        dismiss()
-	                    }
+                        let created = dataStore.registerBusiness(
+                            name: name,
+                            category: category,
+                            details: details,
+                            latitude: coord.latitude,
+                            longitude: coord.longitude,
+                            phone: phone,
+                            lightningLink: lightningLink,
+                            cashuLink: cashuLink
+                        )
+                        persistPhotosAfterSave(businessID: created.businessID)
+                        dismiss()
+                    }
                     .disabled(name.isEmpty || category.isEmpty || details.isEmpty || parsedCoordinate == nil)
                 }
             }
             .onAppear {
                 if let existingBusiness {
                     name = existingBusiness.name
-	                    category = existingBusiness.category
-	                    details = existingBusiness.details
-	                    phone = existingBusiness.phone
-	                    lightningLink = existingBusiness.lightningLink
-	                    cashuLink = existingBusiness.cashuLink
-	                    latitude = String(format: "%.6f", existingBusiness.latitude)
-	                    longitude = String(format: "%.6f", existingBusiness.longitude)
-	                } else if locationState.permissionState == .authorized,
+                    category = existingBusiness.category
+                    details = existingBusiness.details
+                    phone = existingBusiness.phone
+                    lightningLink = existingBusiness.lightningLink
+                    cashuLink = existingBusiness.cashuLink
+                    latitude = String(format: "%.6f", existingBusiness.latitude)
+                    longitude = String(format: "%.6f", existingBusiness.longitude)
+                    if let serviceID = dataStore.linkedServiceID(entityType: "business", entityID: existingBusiness.businessID) {
+                        resolvedServiceID = serviceID
+                        existingPhotoRefs = dataStore.servicePhotoRefs(serviceID: serviceID)
+                        selectedPrimaryPhotoID = existingPhotoRefs.first(where: { $0.primary })?.photoID
+                            ?? existingPhotoRefs.first?.photoID
+                            ?? ""
+                    }
+                } else if locationState.permissionState == .authorized,
                           let loc = locationState.lastKnownLocation {
                     latitude = String(format: "%.6f", loc.coordinate.latitude)
                     longitude = String(format: "%.6f", loc.coordinate.longitude)
                 }
             }
+            .confirmationDialog("Use photo location?", isPresented: $showPhotoLocationPrompt, titleVisibility: .visible) {
+                Button("Use Photo Location") {
+                    guard let draft = pendingPhotoDraft else { return }
+                    latitude = String(format: "%.6f", draft.coordinate.latitude)
+                    longitude = String(format: "%.6f", draft.coordinate.longitude)
+                    commitPendingPhotoDraft(geoSource: "exif_confirmed", includeCoordinate: true)
+                }
+                Button("Keep Current Pin") {
+                    commitPendingPhotoDraft(geoSource: "none", includeCoordinate: false)
+                }
+                Button("Set Manually On Map") {
+                    showCoordinateEditor = true
+                    commitPendingPhotoDraft(geoSource: "manual", includeCoordinate: false)
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingPhotoDraft = nil
+                }
+            } message: {
+                if let draft = pendingPhotoDraft {
+                    Text(String(format: "Photo suggests %.5f, %.5f", draft.coordinate.latitude, draft.coordinate.longitude))
+                }
+            }
+            #if os(iOS)
+            .fullScreenCover(isPresented: $showImagePicker) {
+                ImagePickerView(sourceType: imagePickerSourceType) { image in
+                    showImagePicker = false
+                    guard let image else { return }
+                    guard let data = image.jpegData(compressionQuality: 0.96) else {
+                        error = "Unable to read selected photo."
+                        return
+                    }
+                    handleIncomingPhotoData(data)
+                }
+                .ignoresSafeArea()
+            }
+            #endif
         }
+    }
+
+    private func handleIncomingPhotoData(_ data: Data) {
+        guard canAddPhoto else {
+            error = "You can attach up to 3 photos per listing."
+            return
+        }
+        if let gps = SemayPhotoMetadataExtractor.extractGPS(from: data) {
+            pendingPhotoDraft = PendingPhotoDraft(imageData: data, coordinate: gps.coordinate)
+            showPhotoLocationPrompt = true
+            return
+        }
+        appendPendingPhoto(data: data, exifLatitude: nil, exifLongitude: nil, geoSource: "none")
+    }
+
+    private func commitPendingPhotoDraft(geoSource: String, includeCoordinate: Bool) {
+        guard let draft = pendingPhotoDraft else { return }
+        defer { pendingPhotoDraft = nil }
+        appendPendingPhoto(
+            data: draft.imageData,
+            exifLatitude: includeCoordinate ? draft.coordinate.latitude : nil,
+            exifLongitude: includeCoordinate ? draft.coordinate.longitude : nil,
+            geoSource: geoSource
+        )
+    }
+
+    private func appendPendingPhoto(data: Data, exifLatitude: Double?, exifLongitude: Double?, geoSource: String) {
+        guard canAddPhoto else {
+            error = "You can attach up to 3 photos per listing."
+            return
+        }
+        let photoID = UUID().uuidString.lowercased()
+        pendingPhotos.append(
+            PendingBusinessPhoto(
+                id: photoID,
+                imageData: data,
+                exifLatitude: exifLatitude,
+                exifLongitude: exifLongitude,
+                geoSource: geoSource
+            )
+        )
+        if selectedPrimaryPhotoID.isEmpty {
+            selectedPrimaryPhotoID = photoID
+        }
+    }
+
+    private func persistPhotosAfterSave(businessID: String) {
+        guard let serviceID = dataStore.linkedServiceID(entityType: "business", entityID: businessID) else { return }
+        resolvedServiceID = serviceID
+
+        for pending in pendingPhotos {
+            _ = dataStore.addServicePhotoFromImageData(
+                serviceID: serviceID,
+                imageData: pending.imageData,
+                exifLatitude: pending.exifLatitude,
+                exifLongitude: pending.exifLongitude,
+                geoSource: pending.geoSource,
+                isPrimary: false,
+                preferredPhotoID: pending.id
+            )
+        }
+
+        var refs = dataStore.servicePhotoRefs(serviceID: serviceID)
+        if !selectedPrimaryPhotoID.isEmpty, refs.contains(where: { $0.photoID == selectedPrimaryPhotoID }) {
+            let now = Int(Date().timeIntervalSince1970)
+            refs = refs.map { ref in
+                SemayServicePhotoRef(
+                    photoID: ref.photoID,
+                    serviceID: ref.serviceID,
+                    sha256: ref.sha256,
+                    mimeType: ref.mimeType,
+                    width: ref.width,
+                    height: ref.height,
+                    bytesFull: ref.bytesFull,
+                    bytesThumb: ref.bytesThumb,
+                    takenAt: ref.takenAt,
+                    exifLatitude: ref.exifLatitude,
+                    exifLongitude: ref.exifLongitude,
+                    geoSource: ref.geoSource,
+                    primary: ref.photoID == selectedPrimaryPhotoID,
+                    remoteURL: ref.remoteURL,
+                    createdAt: ref.createdAt,
+                    updatedAt: now
+                )
+            }
+            dataStore.upsertServicePhotoRefs(serviceID: serviceID, refs: refs, emitServiceUpdate: true)
+        }
+    }
+
+    @ViewBuilder
+    private func businessPhotoThumbnail(serviceID: String?, photoID: String?, pendingData: Data?) -> some View {
+        #if os(iOS)
+        if let pendingData, let image = UIImage(data: pendingData) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        } else if let serviceID, let photoID,
+                  let thumbURL = dataStore.servicePhotoThumbURL(serviceID: serviceID, photoID: photoID),
+                  let image = UIImage(contentsOfFile: thumbURL.path) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.ultraThinMaterial)
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 56, height: 56)
+        }
+        #else
+        if let pendingData, let image = NSImage(data: pendingData) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        } else if let serviceID, let photoID,
+                  let thumbURL = dataStore.servicePhotoThumbURL(serviceID: serviceID, photoID: photoID),
+                  let image = NSImage(contentsOf: thumbURL) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.ultraThinMaterial)
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 56, height: 56)
+        }
+        #endif
     }
 }
 
 		private struct SemayMeTabView: View {
 		    @EnvironmentObject private var dataStore: SemayDataStore
 		    @EnvironmentObject private var seedService: SeedPhraseService
-            @Environment(\.openURL) private var openURL
+		    @Environment(\.openURL) private var openURL
 		    @AppStorage("semay.settings.advanced") private var advancedSettingsEnabled = false
             @AppStorage("semay.icloud_backup_enabled") private var iCloudBackupEnabled = false
+            @AppStorage("semay.translation.offline_enabled") private var offlineTranslationEnabled = true
+            @AppStorage("semay.offline_maps.require_signed_packs") private var requireSignedOfflinePacks = false
+            @AppStorage("semay.map.country_packs.enabled") private var countryPacksEnabled = false
 		    @StateObject private var safety = SafetyModeService.shared
 		    @StateObject private var envelopeSync = SemayEnvelopeSyncService.shared
 		    @StateObject private var tileStore = OfflineTileStore.shared
 		    @StateObject private var reachability = NetworkReachabilityService.shared
+            @StateObject private var mapEngine = MapEngineCoordinator.shared
 	
 	    @State private var revealPhrase = false
 	    @State private var showRestoreSeed = false
@@ -2585,7 +5924,11 @@ private struct BusinessEditorSheet: View {
 	            @State private var aboutNotice = ""
 	            @State private var cloudBackupBusy = false
 	            @State private var cloudBackupNotice = ""
-	            @State private var cloudBackupError = ""
+            @State private var cloudBackupError = ""
+
+            private var iCloudBackupAvailable: Bool {
+                seedService.isICloudBackupAvailable()
+            }
                 @State private var legalSupportNotice = ""
 	
 	    var body: some View {
@@ -2606,6 +5949,16 @@ private struct BusinessEditorSheet: View {
                         get: { safety.presenceEnabled },
                         set: { safety.setPresenceEnabled($0) }
                     ))
+                }
+
+                Section("Offline Translation") {
+                    Toggle("Offline Dictionary", isOn: $offlineTranslationEnabled)
+                    Text("Disable only if you want to turn off installed offline language support.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Translation currently applies to chat/listing text. Base-map labels come from your installed map pack language.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
 	                Section("About") {
@@ -2657,11 +6010,17 @@ private struct BusinessEditorSheet: View {
 
                 Section("iCloud Backup (Optional)") {
                     Toggle("Enable iCloud Backup", isOn: $iCloudBackupEnabled)
+                        .disabled(!iCloudBackupAvailable)
                     Text("Backs up private Semay settings and identity metadata encrypted with your seed-derived key. No plaintext seed is uploaded.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if !iCloudBackupAvailable {
+                        Text("iCloud backup is unavailable for this build. Manual seed backup remains available.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
 
-                    if iCloudBackupEnabled {
+                    if iCloudBackupEnabled && iCloudBackupAvailable {
                         Button(cloudBackupBusy ? "Syncing..." : "Backup Now") {
                             Task {
                                 await uploadCloudBackup()
@@ -2715,7 +6074,68 @@ private struct BusinessEditorSheet: View {
                     }
                 }
 
+                if advancedSettingsEnabled {
+                    Section("Map Engine (Advanced)") {
+                        Menu("Preferred Engine: \(mapEngine.selectedEngine.label)") {
+                            ForEach(MapEngine.allCases) { engine in
+                                Button {
+                                    mapEngine.setPreferredEngine(engine)
+                                } label: {
+                                    if mapEngine.selectedEngine == engine {
+                                        Label(engine.label, systemImage: "checkmark")
+                                    } else {
+                                        Text(engine.label)
+                                    }
+                                }
+                                .disabled(engine == .maplibre && !mapEngine.mapLibreAllowed)
+                            }
+                        }
+
+                        let effectiveLabel = mapEngine.effectiveEngine.label
+                        Text("Effective engine: \(effectiveLabel)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        if mapEngine.selectedEngine == .maplibre && mapEngine.mapLibreRemoteDisabled {
+                            Text("Remote policy disabled Semay Map for this node; app is using MapKit.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else if mapEngine.sessionFallbackToMapKit {
+                            Text("Semay Map failed this session and fell back to MapKit.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+
+                        let stability = mapEngine.mapLibreStabilitySnapshot
+                        Text(
+                            "Fallback-free sessions (\(stability.windowDays)d): \(stability.successfulSessions)/\(stability.mapLibreSessions) (\(formatPercent(stability.fallbackFreeRate)))"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Text("Observed days: \(stability.observedDays)/\(stability.windowDays)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(
+                            stability.meetsGate
+                                ? "Stability gate met (\(formatPercent(stability.targetRate)) target)."
+                                : "Stability gate not met (\(formatPercent(stability.targetRate)) target)."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(stability.meetsGate ? .green : .orange)
+
+                        Button("Reset Map Engine Metrics") {
+                            mapEngine.clearMapLibreStabilityMetrics()
+                        }
+                    }
+                }
+
                 Section("Offline Maps") {
+                    if advancedSettingsEnabled {
+                        Toggle("Enable Country Pack Catalog", isOn: $countryPacksEnabled)
+                        Text("Feature flag for Eritrea/Ethiopia country-pack cards and direct install flow.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if let pack = tileStore.availablePack {
                         Text("Installed: \(pack.name)")
                         Text("Size: \(formatSize(pack.sizeBytes))")
@@ -2812,14 +6232,18 @@ private struct BusinessEditorSheet: View {
                         }
                     }
 
-	                if advancedSettingsEnabled {
-	                    Section("Node (Advanced)") {
-	                        Text("Leave this blank to auto-detect a nearby node. Set it only if you're operating your own Semay node.")
-	                            .font(.caption)
-	                            .foregroundStyle(.secondary)
-	                        if let nodeName = tileStore.activeNodeName, !nodeName.isEmpty {
-	                            Text("Connected node: \(nodeName)")
-	                                .font(.caption)
+		                if advancedSettingsEnabled {
+		                    Section("Node (Advanced)") {
+		                        Text("Leave this blank to auto-detect a nearby node. Set it only if you're operating your own Semay node.")
+		                            .font(.caption)
+		                            .foregroundStyle(.secondary)
+                        Toggle("Require Signed Offline Packs", isOn: $requireSignedOfflinePacks)
+                        Text("When enabled, imports and node installs must include valid hash + signature metadata.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+		                        if let nodeName = tileStore.activeNodeName, !nodeName.isEmpty {
+		                            Text("Connected node: \(nodeName)")
+		                                .font(.caption)
 	                                .foregroundStyle(.secondary)
 	                        }
 	                        if let activeURL = tileStore.activeMapSourceBaseURL, !activeURL.isEmpty {
@@ -2902,6 +6326,21 @@ private struct BusinessEditorSheet: View {
                 hubBaseURL = dataStore.hubBaseURLString()
                 hubToken = dataStore.hubIngestToken()
                 tileStore.refresh()
+                mapEngine.refreshRuntimeState()
+                SemayTranslationService.shared.setTranslationEnabled(offlineTranslationEnabled)
+                SemayTranslationService.shared.setQualityMode(.strict)
+                if !iCloudBackupAvailable {
+                    iCloudBackupEnabled = false
+                }
+            }
+            .onChange(of: offlineTranslationEnabled) { enabled in
+                SemayTranslationService.shared.setTranslationEnabled(enabled)
+            }
+            .onChange(of: iCloudBackupEnabled) { enabled in
+                if enabled && !iCloudBackupAvailable {
+                    iCloudBackupEnabled = false
+                    cloudBackupError = "iCloud backup is unavailable for this build."
+                }
             }
             .sheet(isPresented: $showRestoreSeed) {
                 SemayRestoreSeedSheet(isPresented: $showRestoreSeed)
@@ -2925,135 +6364,167 @@ private struct BusinessEditorSheet: View {
         String(format: "%.4f", value)
     }
 
-	    private func formatSize(_ bytes: Int64) -> String {
-	        let formatter = ByteCountFormatter()
-	        formatter.allowedUnits = [.useKB, .useMB, .useGB]
-	        formatter.countStyle = .file
-	        return formatter.string(fromByteCount: bytes)
-	    }
-	
-		    private func installOfflineMaps() async {
-		        installingOfflineMaps = true
-		        offlineMapsNotice = ""
-		        offlineMapsError = ""
-		        defer { installingOfflineMaps = false }
-		
-		        do {
-		            if reachability.isOnline {
-		                do {
-		                    let installed = try await tileStore.installRecommendedPack()
-		                    offlineMapsNotice = "Downloaded offline maps: \(installed.name)."
-		                    return
-		                } catch {
-		                    let reason = error.localizedDescription
-		                    if tileStore.availablePack == nil, tileStore.canInstallBundledStarterPack {
-		                        let installed = try tileStore.installBundledStarterPack()
-		                        offlineMapsNotice = "Couldn't download full offline maps (\(reason)). Installed starter offline maps: \(installed.name)."
-		                        return
-		                    }
-		                    offlineMapsError = "Couldn't download full offline maps (\(reason))."
-		                    return
-		                }
-		            }
+    private func formatPercent(_ value: Double) -> String {
+        String(format: "%.2f%%", value)
+    }
 
-		            let installed = try tileStore.installBundledStarterPack()
-		            offlineMapsNotice = "Installed \(installed.name)."
-		        } catch {
-		            offlineMapsError = error.localizedDescription
-		        }
-		    }
+    private func formatSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
 
-            private func uploadCloudBackup() async {
-                cloudBackupBusy = true
-                cloudBackupNotice = ""
-                cloudBackupError = ""
-                defer { cloudBackupBusy = false }
-                #if canImport(CloudKit)
+    private func installOfflineMaps() async {
+        installingOfflineMaps = true
+        offlineMapsNotice = ""
+        offlineMapsError = ""
+        defer { installingOfflineMaps = false }
+
+        do {
+            if reachability.isOnline {
                 do {
-                    try await seedService.uploadEncryptedBackupToICloud()
-                    cloudBackupNotice = "Backup uploaded to iCloud."
-                } catch {
-                    cloudBackupError = error.localizedDescription
-                }
-                #else
-                cloudBackupError = "iCloud backup is unavailable on this platform."
-                #endif
-            }
-
-            private func restoreCloudBackup() async {
-                cloudBackupBusy = true
-                cloudBackupNotice = ""
-                cloudBackupError = ""
-                defer { cloudBackupBusy = false }
-                #if canImport(CloudKit)
-                do {
-                    let restored = try await seedService.restoreEncryptedBackupFromICloud()
-                    if restored {
-                        cloudBackupNotice = "Backup restored from iCloud."
-                    } else {
-                        cloudBackupNotice = "No backup changes were applied."
-                    }
-                } catch {
-                    cloudBackupError = error.localizedDescription
-                }
-                #else
-                cloudBackupError = "iCloud backup is unavailable on this platform."
-                #endif
-            }
-
-            private var appVersionString: String {
-                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-                let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-                return "\(version) (\(build))"
-            }
-
-	            private func handleAboutTap() {
-	                guard !advancedSettingsEnabled else { return }
-	                aboutTapCount += 1
-	                if aboutTapCount >= 7 {
-	                    advancedSettingsEnabled = true
-	                    aboutNotice = "Advanced settings enabled."
-	                    aboutTapCount = 0
-	                }
-	            }
-
-                private func openSupport() {
-                    if let email = bundleString(for: "SemaySupportEmail"),
-                       !email.isEmpty,
-                       var components = URLComponents(string: "mailto:\(email)") {
-                        components.queryItems = [
-                            URLQueryItem(name: "subject", value: "Semay Support")
-                        ]
-                        if let mailtoURL = components.url {
-                            openURL(mailtoURL)
-                            legalSupportNotice = ""
-                            return
+                    let installed: OfflineTilePack
+                    let countryPacks = countryPacksEnabled ? (try await tileStore.featuredCountryPacks()) : []
+                    if let preferred = countryPacks.first(where: { $0.isFeatured ?? false }) ?? countryPacks.first {
+                        let packID = (preferred.packID ?? preferred.id).trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !packID.isEmpty else {
+                            throw NSError(
+                                domain: "OfflineTileStore",
+                                code: 61,
+                                userInfo: [NSLocalizedDescriptionKey: "Pack identifier is required."]
+                            )
                         }
+                        installed = try await tileStore.installCountryPack(packID: packID)
+                    } else {
+                        installed = try await tileStore.installRecommendedPack()
                     }
-
-                    openConfiguredURL(infoKey: "SemaySupportURL", label: "Support URL")
-                }
-
-                private func openConfiguredURL(infoKey: String, label: String) {
-                    guard let urlString = bundleString(for: infoKey),
-                          let url = URL(string: urlString),
-                          let scheme = url.scheme,
-                          !scheme.isEmpty else {
-                        legalSupportNotice = "\(label) is not configured."
+                    offlineMapsNotice = "Downloaded offline maps: \(installed.name)."
+                    return
+                } catch {
+                    let reason = userFacingOfflineMapError(error)
+                    if isSignedPackPolicyError(error) {
+                        offlineMapsError = "Couldn't download offline maps (\(reason))."
                         return
                     }
-                    openURL(url)
-                    legalSupportNotice = ""
-                }
-
-                private func bundleString(for key: String) -> String? {
-                    guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
-                        return nil
+                    if tileStore.availablePack == nil, tileStore.canInstallBundledStarterPack {
+                        let installed = try tileStore.installBundledStarterPack()
+                        offlineMapsNotice = "Couldn't download full offline maps (\(reason)). Installed starter offline maps: \(installed.name)."
+                        return
                     }
-                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return trimmed.isEmpty ? nil : trimmed
+                    offlineMapsError = "Couldn't download full offline maps (\(reason))."
+                    return
                 }
-			}
+            }
+
+            let installed = try tileStore.installBundledStarterPack()
+            offlineMapsNotice = "Installed \(installed.name)."
+        } catch {
+            offlineMapsError = userFacingOfflineMapError(error)
+        }
+    }
+
+    private func uploadCloudBackup() async {
+        cloudBackupBusy = true
+        cloudBackupNotice = ""
+        cloudBackupError = ""
+        defer { cloudBackupBusy = false }
+        guard seedService.isICloudBackupAvailable() else {
+            iCloudBackupEnabled = false
+            cloudBackupError = "iCloud backup is unavailable for this build."
+            return
+        }
+        #if canImport(CloudKit)
+        do {
+            try await seedService.uploadEncryptedBackupToICloud()
+            cloudBackupNotice = "Backup uploaded to iCloud."
+        } catch {
+            cloudBackupError = error.localizedDescription
+        }
+        #else
+        cloudBackupError = "iCloud backup is unavailable on this platform."
+        #endif
+    }
+
+    private func restoreCloudBackup() async {
+        cloudBackupBusy = true
+        cloudBackupNotice = ""
+        cloudBackupError = ""
+        defer { cloudBackupBusy = false }
+        guard seedService.isICloudBackupAvailable() else {
+            iCloudBackupEnabled = false
+            cloudBackupError = "iCloud backup is unavailable for this build."
+            return
+        }
+        #if canImport(CloudKit)
+        do {
+            let restored = try await seedService.restoreEncryptedBackupFromICloud()
+            if restored {
+                cloudBackupNotice = "Backup restored from iCloud."
+            } else {
+                cloudBackupNotice = "No backup changes were applied."
+            }
+        } catch {
+            cloudBackupError = error.localizedDescription
+        }
+        #else
+        cloudBackupError = "iCloud backup is unavailable on this platform."
+        #endif
+    }
+
+    private var appVersionString: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+
+    private func handleAboutTap() {
+        guard !advancedSettingsEnabled else { return }
+        aboutTapCount += 1
+        if aboutTapCount >= 7 {
+            advancedSettingsEnabled = true
+            aboutNotice = "Advanced settings enabled."
+            aboutTapCount = 0
+        }
+    }
+
+    private func openSupport() {
+        if let email = bundleString(for: "SemaySupportEmail"),
+           !email.isEmpty,
+           var components = URLComponents(string: "mailto:\(email)") {
+            components.queryItems = [
+                URLQueryItem(name: "subject", value: "Semay Support")
+            ]
+            if let mailtoURL = components.url {
+                openURL(mailtoURL)
+                legalSupportNotice = ""
+                return
+            }
+        }
+
+        openConfiguredURL(infoKey: "SemaySupportURL", label: "Support URL")
+    }
+
+    private func openConfiguredURL(infoKey: String, label: String) {
+        guard let urlString = bundleString(for: infoKey),
+              let url = URL(string: urlString),
+              let scheme = url.scheme,
+              !scheme.isEmpty else {
+            legalSupportNotice = "\(label) is not configured."
+            return
+        }
+        openURL(url)
+        legalSupportNotice = ""
+    }
+
+    private func bundleString(for key: String) -> String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
 
 private struct SemayRestoreSeedSheet: View {
     @Binding var isPresented: Bool

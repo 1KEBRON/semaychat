@@ -193,8 +193,18 @@ final class SeedPhraseService: ObservableObject {
         )
     }
 
+    func isICloudBackupAvailable() -> Bool {
+        #if canImport(CloudKit)
+        return Self.hasUsableICloudContext()
+        #else
+        return false
+        #endif
+    }
+
     #if canImport(CloudKit)
     func uploadEncryptedBackupToICloud() async throws {
+        try ensureICloudBackupAvailability()
+
         guard let metadata = createIdentityBackupMetadata() else {
             throw NSError(
                 domain: "SeedPhraseService",
@@ -238,6 +248,8 @@ final class SeedPhraseService: ObservableObject {
 
     @discardableResult
     func restoreEncryptedBackupFromICloud() async throws -> Bool {
+        try ensureICloudBackupAvailability()
+
         guard let key = cloudEncryptionKey() else {
             throw NSError(
                 domain: "SeedPhraseService",
@@ -280,6 +292,20 @@ final class SeedPhraseService: ObservableObject {
         }
 
         return true
+    }
+
+    private func ensureICloudBackupAvailability() throws {
+        guard Self.hasUsableICloudContext() else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 25,
+                userInfo: [NSLocalizedDescriptionKey: "iCloud backup is unavailable. Sign in to iCloud on this device or use manual seed backup."]
+            )
+        }
+    }
+
+    private static func hasUsableICloudContext() -> Bool {
+        FileManager.default.ubiquityIdentityToken != nil
     }
     #endif
 
