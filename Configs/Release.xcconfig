@@ -8,5 +8,5 @@ SWIFT_VERSION = 5.0
 DEVELOPMENT_TEAM = L3N5LHJD5Y
 CODE_SIGN_STYLE = Automatic
 
-PRODUCT_BUNDLE_IDENTIFIER = chat.bitchat
-SEMAY_APP_GROUP_IDENTIFIER = group.chat.bitchat
+PRODUCT_BUNDLE_IDENTIFIER = com.zerieinsight.semaychat
+SEMAY_APP_GROUP_IDENTIFIER = group.com.zerieinsight.semaychat
