@@ -67,6 +67,79 @@ enum SemayMapSurfaceMode: Equatable {
     }
 }
 
+enum SemayMapBaseLayerMode: Equatable {
+    case none
+    case online
+    case offline
+}
+
+enum SemayMapStatusBannerMode: Equatable {
+    case online
+    case offlinePack
+    case offlineUnavailable
+
+    static func resolve(isOnline: Bool, hasActiveOfflinePack: Bool) -> SemayMapStatusBannerMode {
+        if hasActiveOfflinePack {
+            return .offlinePack
+        }
+        return isOnline ? .online : .offlineUnavailable
+    }
+}
+
+enum SemayMapInstallPromptPolicy {
+    static func canInstallOnlinePack(
+        isOnline: Bool,
+        hubCatalogReachable: Bool,
+        communityPackDownloadAvailable: Bool
+    ) -> Bool {
+        isOnline && hubCatalogReachable && communityPackDownloadAvailable
+    }
+
+    static func canInstallBundledStarter(
+        isOnline: Bool,
+        canInstallBundledStarterPack: Bool
+    ) -> Bool {
+        !isOnline && canInstallBundledStarterPack
+    }
+
+    static func canShowInstallCTA(
+        isOnline: Bool,
+        hubCatalogReachable: Bool,
+        communityPackDownloadAvailable: Bool,
+        canInstallBundledStarterPack: Bool
+    ) -> Bool {
+        canInstallOnlinePack(
+            isOnline: isOnline,
+            hubCatalogReachable: hubCatalogReachable,
+            communityPackDownloadAvailable: communityPackDownloadAvailable
+        ) || canInstallBundledStarter(
+            isOnline: isOnline,
+            canInstallBundledStarterPack: canInstallBundledStarterPack
+        )
+    }
+}
+
+enum SemayMapBaseLayerPolicy {
+    static let minimumOnlineCoverageForOfflinePreference = 0.70
+
+    static func resolve(
+        isOnline: Bool,
+        isBundledStarterSelected: Bool,
+        bestPackCoverageRatio: Double?
+    ) -> SemayMapBaseLayerMode {
+        if isBundledStarterSelected {
+            return isOnline ? .online : .none
+        }
+        guard let coverage = bestPackCoverageRatio else {
+            return isOnline ? .online : .none
+        }
+        if isOnline && coverage < minimumOnlineCoverageForOfflinePreference {
+            return .online
+        }
+        return .offline
+    }
+}
+
 private enum SemayMapSurfacePolicy {
     private static let centerLatKey = "semay.map.surface.last_center_lat"
     private static let centerLonKey = "semay.map.surface.last_center_lon"
@@ -992,9 +1065,21 @@ private struct SemayMapTabView: View {
             && communityPackDownloadAvailable
         let featuredPack = preferredFeaturedCountryPack()
         let featuredInstallLabel = featuredPack.map(countryInstallButtonTitle(for:)) ?? String(localized: "semay.map.install", defaultValue: "Install")
-        let canInstallOnlinePackNow = reachability.isOnline && hubCatalogReachable && communityPackDownloadAvailable
-        let canInstallStarterNow = !reachability.isOnline && tileStore.canInstallBundledStarterPack
-        let canInstallNow = canInstallOnlinePackNow || canInstallStarterNow
+        let canInstallOnlinePackNow = SemayMapInstallPromptPolicy.canInstallOnlinePack(
+            isOnline: reachability.isOnline,
+            hubCatalogReachable: hubCatalogReachable,
+            communityPackDownloadAvailable: communityPackDownloadAvailable
+        )
+        let canInstallStarterNow = SemayMapInstallPromptPolicy.canInstallBundledStarter(
+            isOnline: reachability.isOnline,
+            canInstallBundledStarterPack: tileStore.canInstallBundledStarterPack
+        )
+        let canInstallNow = SemayMapInstallPromptPolicy.canShowInstallCTA(
+            isOnline: reachability.isOnline,
+            hubCatalogReachable: hubCatalogReachable,
+            communityPackDownloadAvailable: communityPackDownloadAvailable,
+            canInstallBundledStarterPack: tileStore.canInstallBundledStarterPack
+        )
         let engineStatus = mapEngine.effectiveEngine == .maplibre
             ? "Engine: Semay Map"
             : (mapEngine.selectedEngine == .maplibre ? "Engine: MapKit fallback" : "Engine: MapKit")
@@ -1866,19 +1951,19 @@ private struct SemayMapTabView: View {
     }
 
     private func updateBaseLayerForConnectivity() {
-        if tileStore.isBundledStarterSelected {
-            useOfflineTiles = false
-            useOSMBaseMap = reachability.isOnline
-            return
-        }
+        let best = tileStore.bestPackOrNil(for: region)
+        let coverage = best.map { tileStore.coverageRatio(for: $0, in: region) }
+        let mode = SemayMapBaseLayerPolicy.resolve(
+            isOnline: reachability.isOnline,
+            isBundledStarterSelected: tileStore.isBundledStarterSelected,
+            bestPackCoverageRatio: coverage
+        )
 
-        // Avoid patchy "tile island" UX: online mode only prefers offline when viewport coverage is strong.
-        let onlineOfflineThreshold = 0.70
-        if let best = tileStore.bestPackOrNil(for: region) {
-            let coverage = tileStore.coverageRatio(for: best, in: region)
-            if reachability.isOnline && coverage < onlineOfflineThreshold {
+        switch mode {
+        case .offline:
+            guard let best else {
                 useOfflineTiles = false
-                useOSMBaseMap = true
+                useOSMBaseMap = reachability.isOnline
                 return
             }
             if best.path != tileStore.availablePack?.path {
@@ -1887,10 +1972,13 @@ private struct SemayMapTabView: View {
             useOfflineTiles = true
             useOSMBaseMap = false
             lastAutoPackPath = best.path
-            return
+        case .online:
+            useOfflineTiles = false
+            useOSMBaseMap = true
+        case .none:
+            useOfflineTiles = false
+            useOSMBaseMap = false
         }
-        useOfflineTiles = false
-        useOSMBaseMap = reachability.isOnline
     }
 
     private func estimatedZoomLevel(for region: MKCoordinateRegion) -> Int {
@@ -2013,16 +2101,21 @@ private struct SemayMapTabView: View {
     }
 
     private func mapSurfaceStatusText() -> String {
-        if useOfflineTiles, tileStore.availablePack != nil {
-            return String(localized: "semay.map.state.offline_pack", defaultValue: "Offline pack installed")
-        }
-        if reachability.isOnline {
-            return String(localized: "semay.map.state.online", defaultValue: "Online map active")
-        }
-        return String(
-            localized: "semay.map.state.offline_unavailable",
-            defaultValue: "Offline map unavailable; download when online"
+        let mode = SemayMapStatusBannerMode.resolve(
+            isOnline: reachability.isOnline,
+            hasActiveOfflinePack: useOfflineTiles && tileStore.availablePack != nil
         )
+        switch mode {
+        case .offlinePack:
+            return String(localized: "semay.map.state.offline_pack", defaultValue: "Offline pack installed")
+        case .online:
+            return String(localized: "semay.map.state.online", defaultValue: "Online map active")
+        case .offlineUnavailable:
+            return String(
+                localized: "semay.map.state.offline_unavailable",
+                defaultValue: "Offline map unavailable; download when online"
+            )
+        }
     }
 
     private func preferredFeaturedCountryPack() -> HubTilePack? {
