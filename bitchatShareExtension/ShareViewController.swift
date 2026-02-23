@@ -13,7 +13,13 @@ import UniformTypeIdentifiers
 /// Avoids deprecated Social framework and SLComposeServiceViewController.
 final class ShareViewController: UIViewController {
     // Bundle.main.bundleIdentifier would get the extension's bundleID
-    private static let groupID = "group.chat.bitchat"
+    private static let groupID: String = {
+        if let value = Bundle.main.object(forInfoDictionaryKey: "SemayAppGroupIdentifier") as? String,
+           !value.isEmpty {
+            return value
+        }
+        return "group.chat.bitchat"
+    }()
 
     private enum Strings {
         static let nothingToShare = String(localized: "share.status.nothing_to_share", comment: "Shown when the share extension receives no content")
