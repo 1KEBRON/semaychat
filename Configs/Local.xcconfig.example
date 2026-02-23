@@ -3,3 +3,5 @@ DEVELOPMENT_TEAM = ABC123
 
 // Unique bundle id to be able to register and run locally
 PRODUCT_BUNDLE_IDENTIFIER = chat.bitchat.$(DEVELOPMENT_TEAM)
+// Shared app group used by main app + share extension
+SEMAY_APP_GROUP_IDENTIFIER = group.chat.bitchat.$(DEVELOPMENT_TEAM)

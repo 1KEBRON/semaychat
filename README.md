@@ -100,10 +100,11 @@ For detailed protocol documentation, see the [Technical Whitepaper](WHITEPAPER.m
 
    To run on a device there're a few steps to prepare the code:
    - Clone the local configs: `cp Configs/Local.xcconfig.example Configs/Local.xcconfig`
-   - Add your Developer Team ID into the newly created `Configs/Local.xcconfig`
-      - Bundle ID would be set to `chat.bitchat.<team_id>` (unless you set to something else)
-   - Entitlements need to be updated manually (TODO: Automate):
-      - Search and replace `group.chat.bitchat` with `group.<your_bundle_id>` (e.g. `group.chat.bitchat.ABC123`)
+   - Configure local team + bundle identity:
+      - `./scripts/configure_local_identity.sh --team-id <TEAM_ID>`
+      - This updates:
+         - `PRODUCT_BUNDLE_IDENTIFIER` (default: `chat.bitchat.<team_id>`)
+         - `SEMAY_APP_GROUP_IDENTIFIER` (default: `group.<bundle_id>`)
 
 ### Option 2: Using `just`
 
