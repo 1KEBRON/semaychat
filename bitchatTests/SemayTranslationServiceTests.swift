@@ -3,14 +3,13 @@ import Testing
 
 @Suite(.serialized)
 struct SemayTranslationServiceTests {
-    @Test func englishStarterPhraseTranslates() {
+    @Test func englishCuratedPhraseTranslatesInStrictMode() {
         let service = SemayTranslationService.shared
         service.setTranslationEnabled(true)
         service.setQualityMode(.strict)
 
         let translation = service.translate("hello", to: .tigrinya)
-        #expect(translation != nil)
-        #expect(!(translation ?? "").isEmpty)
+        #expect(translation == "ሰላም")
     }
 
     @Test func ethiopicAliasTranslatesToEnglish() {
@@ -28,8 +27,7 @@ struct SemayTranslationServiceTests {
         service.setQualityMode(.strict)
 
         let translation = service.translate("THANKS!!!", to: .amharic)
-        #expect(translation != nil)
-        #expect(!(translation ?? "").isEmpty)
+        #expect(translation == "አመሰግናለሁ")
     }
 
     @Test func strictModeRejectsLowConfidenceWordByWordFallback() {
@@ -39,6 +37,24 @@ struct SemayTranslationServiceTests {
 
         let translation = service.translate("hello water", to: .tigrinya)
         #expect(translation == nil)
+    }
+
+    @Test func strictModeRejectsPermissiveOnlyDirectEntry() {
+        let service = SemayTranslationService.shared
+        service.setTranslationEnabled(true)
+        service.setQualityMode(.strict)
+
+        let translation = service.translate("bus stop", to: .tigrinya)
+        #expect(translation == nil)
+    }
+
+    @Test func strictModeHidesPermissiveOnlyAvailableTargets() {
+        let service = SemayTranslationService.shared
+        service.setTranslationEnabled(true)
+        service.setQualityMode(.strict)
+
+        let targets = service.availableTargets(for: "bus stop")
+        #expect(targets.isEmpty)
     }
 
     @Test func permissiveModeAllowsWordByWordFallback() {

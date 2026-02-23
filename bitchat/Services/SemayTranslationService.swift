@@ -27,9 +27,23 @@ enum TranslationQualityMode: String {
     case permissive
 }
 
+private typealias SemayPhraseBook = [SemayTranslationLanguage: [SemayTranslationLanguage: [String: String]]]
+
+private struct SemayLoadedPhraseBooks {
+    let permissive: SemayPhraseBook
+    let strict: SemayPhraseBook
+}
+
 private struct SemayTranslationBundle: Decodable {
     let version: String?
     let dictionary: [String: [String: [String: String]]]
+    let strictDictionary: [String: [String: [String: String]]]?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case dictionary
+        case strictDictionary = "strict_dictionary"
+    }
 }
 
 /// Lightweight offline translation service backed by local starter dictionaries.
@@ -60,7 +74,8 @@ final class SemayTranslationService {
     private static let tigrinyaScriptMarkers = ["ኣ", "በጃኻ", "ክንደይ", "ኣበይ", "እወ"]
     private static let amharicScriptMarkers = ["አ", "እባክ", "አመሰግናለሁ", "ስንት", "የት", "እንዴት"]
 
-    private var phraseBook: [SemayTranslationLanguage: [SemayTranslationLanguage: [String: String]]] = [:]
+    private var permissivePhraseBook: SemayPhraseBook = [:]
+    private var strictPhraseBook: SemayPhraseBook = [:]
     private var translationEnabled: Bool {
         get {
             if UserDefaults.standard.object(forKey: translationEnabledKey) == nil {
@@ -86,7 +101,9 @@ final class SemayTranslationService {
     }
 
     private init() {
-        phraseBook = Self.loadStarterBundle()
+        let loaded = Self.loadStarterBundle()
+        permissivePhraseBook = loaded.permissive
+        strictPhraseBook = loaded.strict
     }
 
     func setTranslationEnabled(_ enabled: Bool) {
@@ -136,7 +153,8 @@ final class SemayTranslationService {
             return []
         }
         let source = detectLanguage(for: text)
-        guard let destinations = phraseBook[source] else { return [] }
+        let activePhraseBook = currentPhraseBook()
+        guard let destinations = activePhraseBook[source] else { return [] }
 
         let normalized = normalize(text)
         let canonical = canonicalizeText(normalized)
@@ -164,7 +182,8 @@ final class SemayTranslationService {
         }
         let source = detectLanguage(for: text)
         guard source != targetLanguage else { return nil }
-        guard let sourceToTargets = phraseBook[source],
+        let activePhraseBook = currentPhraseBook()
+        guard let sourceToTargets = activePhraseBook[source],
               let sourceTargetBook = sourceToTargets[targetLanguage],
               !sourceTargetBook.isEmpty else {
             return nil
@@ -205,8 +224,12 @@ final class SemayTranslationService {
     }
 
     private func languageMatch(against language: SemayTranslationLanguage, words: Set<String>) -> Bool {
-        let directVocabulary = Set(phraseBook[language]?.values.flatMap { $0.keys } ?? [])
+        let directVocabulary = Set(permissivePhraseBook[language]?.values.flatMap { $0.keys } ?? [])
         return !directVocabulary.isDisjoint(with: words)
+    }
+
+    private func currentPhraseBook() -> SemayPhraseBook {
+        qualityMode == .strict ? strictPhraseBook : permissivePhraseBook
     }
 
     private func normalize(_ text: String) -> String {
@@ -248,15 +271,27 @@ final class SemayTranslationService {
         return false
     }
 
-    private static func loadStarterBundle() -> [SemayTranslationLanguage: [SemayTranslationLanguage: [String: String]]] {
+    private static func loadStarterBundle() -> SemayLoadedPhraseBooks {
         guard let url = Bundle.main.url(forResource: "semay-translation-starter", withExtension: "json"),
               let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode(SemayTranslationBundle.self, from: data) else {
-            return fallbackPhraseBook()
+            return SemayLoadedPhraseBooks(
+                permissive: fallbackPermissivePhraseBook(),
+                strict: fallbackStrictPhraseBook()
+            )
         }
 
-        var merged: [SemayTranslationLanguage: [SemayTranslationLanguage: [String: String]]] = [:]
-        for (sourceLanguage, targetMap) in decoded.dictionary {
+        let permissive = normalizePhraseBook(decoded.dictionary)
+        let strict = normalizePhraseBook(decoded.strictDictionary ?? [:])
+
+        let resolvedPermissive = permissive.isEmpty ? fallbackPermissivePhraseBook() : permissive
+        let resolvedStrict = strict.isEmpty ? fallbackStrictPhraseBook() : strict
+        return SemayLoadedPhraseBooks(permissive: resolvedPermissive, strict: resolvedStrict)
+    }
+
+    private static func normalizePhraseBook(_ raw: [String: [String: [String: String]]]) -> SemayPhraseBook {
+        var merged: SemayPhraseBook = [:]
+        for (sourceLanguage, targetMap) in raw {
             guard let source = SemayTranslationLanguage(rawValue: sourceLanguage) else { continue }
 
             var normalizedTargets: [SemayTranslationLanguage: [String: String]] = [:]
@@ -282,7 +317,7 @@ final class SemayTranslationService {
         }
 
         if merged.isEmpty {
-            return fallbackPhraseBook()
+            return [:]
         }
         return merged
     }
@@ -297,7 +332,7 @@ final class SemayTranslationService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func fallbackPhraseBook() -> [SemayTranslationLanguage: [SemayTranslationLanguage: [String: String]]] {
+    private static func fallbackPermissivePhraseBook() -> SemayPhraseBook {
         return [
             .english: [
                 .tigrinya: [
@@ -363,6 +398,55 @@ final class SemayTranslationService {
                     "amenyasalalehu": "yekenye",
                     "buna": "buna",
                     "wih": "wuha"
+                ]
+            ]
+        ]
+    }
+
+    private static func fallbackStrictPhraseBook() -> SemayPhraseBook {
+        return [
+            .english: [
+                .tigrinya: [
+                    "hello": "ሰላም",
+                    "hi": "ሰላም",
+                    "yes": "እወ",
+                    "no": "ኣይ"
+                ],
+                .amharic: [
+                    "hello": "ሰላም",
+                    "hi": "ሰላም",
+                    "yes": "አዎ",
+                    "no": "አይ",
+                    "thank you": "አመሰግናለሁ",
+                    "thanks": "አመሰግናለሁ",
+                    "please": "እባክህ"
+                ]
+            ],
+            .tigrinya: [
+                .english: [
+                    "ሰላም": "hello",
+                    "እወ": "yes",
+                    "ኣይ": "no",
+                    "በጃኻ": "please"
+                ],
+                .amharic: [
+                    "ሰላም": "ሰላም",
+                    "እወ": "አዎ",
+                    "ኣይ": "አይ"
+                ]
+            ],
+            .amharic: [
+                .english: [
+                    "ሰላም": "hello",
+                    "አመሰግናለሁ": "thank you",
+                    "እባክህ": "please",
+                    "አዎ": "yes",
+                    "አይ": "no"
+                ],
+                .tigrinya: [
+                    "ሰላም": "ሰላም",
+                    "አዎ": "እወ",
+                    "አይ": "ኣይ"
                 ]
             ]
         ]
