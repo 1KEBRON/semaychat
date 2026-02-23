@@ -3608,6 +3608,11 @@ private struct SemayMapKitView: UIViewRepresentable {
             urlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         )
         private var offlineOverlays: [String: MBTilesOverlay] = [:]
+        private struct RouteOverlayMetadata {
+            let routeID: String
+            let trustScore: Int
+        }
+        private var routeOverlayMetadata: [ObjectIdentifier: RouteOverlayMetadata] = [:]
 
         init(_ parent: SemayMapKitView) {
             self.parent = parent
@@ -3753,26 +3758,39 @@ private struct SemayMapKitView: UIViewRepresentable {
         }
 
         private func syncRouteOverlays(on mapView: MKMapView, routes: [SemayCuratedRoute]) {
-            let existingRouteOverlays = mapView.overlays.compactMap { $0 as? SemayRoutePolyline }
+            let existingRouteOverlays = mapView.overlays.compactMap { overlay -> MKPolyline? in
+                guard let polyline = overlay as? MKPolyline else { return nil }
+                guard routeOverlayMetadata[ObjectIdentifier(polyline)] != nil else { return nil }
+                return polyline
+            }
             if !existingRouteOverlays.isEmpty {
                 mapView.removeOverlays(existingRouteOverlays)
+                for overlay in existingRouteOverlays {
+                    routeOverlayMetadata.removeValue(forKey: ObjectIdentifier(overlay))
+                }
             }
 
-            let overlays = routes.flatMap { route -> [SemayRoutePolyline] in
-                guard route.waypoints.count >= 2 else { return [] }
-                let coordinates: [CLLocationCoordinate2D] = route.waypoints.compactMap { waypoint -> CLLocationCoordinate2D? in
-                    guard CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: waypoint.latitude, longitude: waypoint.longitude)) else {
-                        return nil
-                    }
-                    return CLLocationCoordinate2D(latitude: waypoint.latitude, longitude: waypoint.longitude)
+            var overlays: [MKPolyline] = []
+            overlays.reserveCapacity(routes.count)
+
+            for route in routes {
+                guard route.waypoints.count >= 2 else { continue }
+
+                var coordinates: [CLLocationCoordinate2D] = []
+                coordinates.reserveCapacity(route.waypoints.count)
+                for waypoint in route.waypoints {
+                    let coordinate = CLLocationCoordinate2D(latitude: waypoint.latitude, longitude: waypoint.longitude)
+                    guard CLLocationCoordinate2DIsValid(coordinate) else { continue }
+                    coordinates.append(coordinate)
                 }
-                guard coordinates.count >= 2 else { return [] }
-                return [SemayRoutePolyline(
+
+                guard coordinates.count >= 2 else { continue }
+                let overlay = MKPolyline(coordinates: coordinates, count: coordinates.count)
+                routeOverlayMetadata[ObjectIdentifier(overlay)] = RouteOverlayMetadata(
                     routeID: route.routeID,
-                    transportType: route.transportType,
-                    trustScore: route.trustScore,
-                    coordinates: coordinates
-                )]
+                    trustScore: route.trustScore
+                )
+                overlays.append(overlay)
             }
             if !overlays.isEmpty {
                 mapView.addOverlays(overlays, level: .aboveRoads)
@@ -3900,11 +3918,12 @@ private struct SemayMapKitView: UIViewRepresentable {
             if let tileOverlay = overlay as? MKTileOverlay {
                 return MKTileOverlayRenderer(tileOverlay: tileOverlay)
             }
-            if let routeOverlay = overlay as? SemayRoutePolyline {
+            if let routeOverlay = overlay as? MKPolyline,
+               let routeMetadata = routeOverlayMetadata[ObjectIdentifier(routeOverlay)] {
                 let renderer = MKPolylineRenderer(polyline: routeOverlay)
-                let selected = routeOverlay.routeID == parent.selectedRouteID
+                let selected = routeMetadata.routeID == parent.selectedRouteID
                 renderer.strokeColor = routeTraceColor(
-                    trustScore: routeOverlay.trustScore,
+                    trustScore: routeMetadata.trustScore,
                     selected: selected
                 )
                 renderer.lineWidth = selected ? 7 : 5
@@ -4030,19 +4049,6 @@ private final class SemayDirectoryServiceAnnotation: NSObject, MKAnnotation {
         self.title = service.name
         self.subtitle = "\(service.serviceType) • \(service.city)"
         super.init()
-    }
-}
-
-private final class SemayRoutePolyline: MKPolyline {
-    let routeID: String
-    let transportType: String
-    let trustScore: Int
-
-    init(routeID: String, transportType: String, trustScore: Int, coordinates: [CLLocationCoordinate2D]) {
-        self.routeID = routeID
-        self.transportType = transportType
-        self.trustScore = trustScore
-        super.init(coordinates: coordinates, count: coordinates.count)
     }
 }
 
