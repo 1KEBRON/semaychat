@@ -5157,8 +5157,13 @@ final class SemayDataStore: ObservableObject {
     private func evaluateServiceContributionQuality(_ entry: SemayServiceDirectoryEntry) -> ServiceContributionQualityResult {
         var flags: [String] = []
 
-        if entry.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || entry.serviceType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let hasName = !entry.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasServiceType = !entry.serviceType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasCategory = !entry.category.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasMinimumDetail = !entry.details.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !entry.phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !entry.website.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !(hasName && hasServiceType && hasCategory && hasMinimumDetail) {
             flags.append("missing_required_fields")
         }
 
