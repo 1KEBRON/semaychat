@@ -38,6 +38,15 @@ private extension View {
         self
         #endif
     }
+
+    @ViewBuilder
+    func semayURLKeyboard() -> some View {
+        #if os(iOS)
+        self.keyboardType(.URL)
+        #else
+        self
+        #endif
+    }
 }
 
 private let offlineTileStoreErrorDomain = OfflineTileStore.errorDomain
@@ -5409,8 +5418,7 @@ private struct SemayServiceEditorSheet: View {
                 TextField(listingString("semay.listing.editor.field.website", "Website (Optional)"), text: $website)
                     .semayDisableAutoCaps()
                     .semayDisableAutocorrection()
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
+                    .semayURLKeyboard()
 
                 if let error {
                     Text(error)
