@@ -3,6 +3,9 @@ import Foundation
 #if canImport(CloudKit)
 import CloudKit
 #endif
+#if canImport(Security)
+import Security
+#endif
 
 @MainActor
 final class SeedPhraseService: ObservableObject {
@@ -65,11 +68,19 @@ final class SeedPhraseService: ObservableObject {
     private let backupFlagKey = "semay.seed.backup.completed"
     private let cloudRecordType = "SemayBackupV1"
     private let cloudRecordName = "primary"
+    private let iCloudContextProvider: () -> Bool
+    private let iCloudEntitlementsProvider: () -> Bool
 
     private lazy var words: [String] = Self.loadWordlist()
 
-    init(keychain: KeychainManagerProtocol = KeychainManager()) {
+    init(
+        keychain: KeychainManagerProtocol = KeychainManager(),
+        iCloudContextProvider: @escaping () -> Bool = SeedPhraseService.defaultICloudContextAvailability,
+        iCloudEntitlementsProvider: @escaping () -> Bool = SeedPhraseService.defaultICloudEntitlementAvailability
+    ) {
         self.keychain = keychain
+        self.iCloudContextProvider = iCloudContextProvider
+        self.iCloudEntitlementsProvider = iCloudEntitlementsProvider
         self.hasCompletedBackup = UserDefaults.standard.bool(forKey: backupFlagKey)
     }
 
@@ -195,7 +206,7 @@ final class SeedPhraseService: ObservableObject {
 
     func isICloudBackupAvailable() -> Bool {
         #if canImport(CloudKit)
-        return Self.hasUsableICloudContext()
+        return iCloudContextProvider() && iCloudEntitlementsProvider()
         #else
         return false
         #endif
@@ -204,6 +215,7 @@ final class SeedPhraseService: ObservableObject {
     #if canImport(CloudKit)
     func uploadEncryptedBackupToICloud() async throws {
         try ensureICloudBackupAvailability()
+        try await ensureICloudAccountAvailability()
 
         guard let metadata = createIdentityBackupMetadata() else {
             throw NSError(
@@ -249,6 +261,7 @@ final class SeedPhraseService: ObservableObject {
     @discardableResult
     func restoreEncryptedBackupFromICloud() async throws -> Bool {
         try ensureICloudBackupAvailability()
+        try await ensureICloudAccountAvailability()
 
         guard let key = cloudEncryptionKey() else {
             throw NSError(
@@ -295,19 +308,88 @@ final class SeedPhraseService: ObservableObject {
     }
 
     private func ensureICloudBackupAvailability() throws {
-        guard Self.hasUsableICloudContext() else {
+        guard iCloudEntitlementsProvider() else {
             throw NSError(
                 domain: "SeedPhraseService",
                 code: 25,
+                userInfo: [NSLocalizedDescriptionKey: "iCloud backup is unavailable in this build configuration. Use manual seed backup."]
+            )
+        }
+
+        guard iCloudContextProvider() else {
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 26,
                 userInfo: [NSLocalizedDescriptionKey: "iCloud backup is unavailable. Sign in to iCloud on this device or use manual seed backup."]
             )
         }
     }
 
-    private static func hasUsableICloudContext() -> Bool {
+    private func ensureICloudAccountAvailability() async throws {
+        let status = try await CKContainer.default().accountStatus()
+        guard status == .available else {
+            let message: String
+            switch status {
+            case .noAccount:
+                message = "iCloud account not available. Sign in to iCloud or use manual seed backup."
+            case .restricted:
+                message = "iCloud backup is restricted on this device. Use manual seed backup."
+            case .couldNotDetermine:
+                message = "Could not verify iCloud account status. Try again later or use manual seed backup."
+            case .temporarilyUnavailable:
+                message = "iCloud is temporarily unavailable. Try again later or use manual seed backup."
+            case .available:
+                message = "iCloud account is available."
+            @unknown default:
+                message = "iCloud backup is unavailable right now. Use manual seed backup."
+            }
+            throw NSError(
+                domain: "SeedPhraseService",
+                code: 27,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        }
+    }
+
+    private nonisolated static func hasUsableICloudContext() -> Bool {
         FileManager.default.ubiquityIdentityToken != nil
     }
+
+    private nonisolated static func hasICloudEntitlements() -> Bool {
+        #if canImport(Security)
+        guard let task = SecTaskCreateFromSelf(nil) else { return false }
+        let services = SecTaskCopyValueForEntitlement(
+            task,
+            "com.apple.developer.icloud-services" as CFString,
+            nil
+        ) as? [Any]
+        let containers = SecTaskCopyValueForEntitlement(
+            task,
+            "com.apple.developer.icloud-container-identifiers" as CFString,
+            nil
+        ) as? [Any]
+        return (services?.isEmpty == false) && (containers?.isEmpty == false)
+        #else
+        return false
+        #endif
+    }
     #endif
+
+    private nonisolated static func defaultICloudContextAvailability() -> Bool {
+        #if canImport(CloudKit)
+        return hasUsableICloudContext()
+        #else
+        return false
+        #endif
+    }
+
+    private nonisolated static func defaultICloudEntitlementAvailability() -> Bool {
+        #if canImport(CloudKit)
+        return hasICloudEntitlements()
+        #else
+        return false
+        #endif
+    }
 
     private func cloudEncryptionKey() -> SymmetricKey? {
         guard let seed = derivedSeedMaterial() else { return nil }

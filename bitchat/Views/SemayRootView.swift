@@ -587,7 +587,18 @@ private struct SeedBackupOnboardingView: View {
                 seedService.completeBackup()
                 isPresented = false
             } catch let uploadError {
-                error = uploadError.localizedDescription
+                iCloudBackupEnabled = false
+                selectedMethod = .manual
+                let fallback = String(
+                    localized: "semay.onboarding.icloud_fallback_manual_after_error",
+                    defaultValue: "iCloud backup couldn't be completed. Switched to \"Write It Down\" so you can continue safely."
+                )
+                let detail = uploadError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                if detail.isEmpty {
+                    error = fallback
+                } else {
+                    error = "\(fallback) \(detail)"
+                }
             }
             #else
             error = "iCloud backup is unavailable on this platform."
@@ -1086,10 +1097,6 @@ private struct SemayMapTabView: View {
             isOnline: reachability.isOnline,
             hubCatalogReachable: hubCatalogReachable,
             communityPackDownloadAvailable: communityPackDownloadAvailable
-        )
-        let canInstallStarterNow = SemayMapInstallPromptPolicy.canInstallBundledStarter(
-            isOnline: reachability.isOnline,
-            canInstallBundledStarterPack: tileStore.canInstallBundledStarterPack
         )
         let canInstallNow = SemayMapInstallPromptPolicy.canShowInstallCTA(
             isOnline: reachability.isOnline,
