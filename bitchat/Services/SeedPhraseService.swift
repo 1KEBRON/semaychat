@@ -356,7 +356,7 @@ final class SeedPhraseService: ObservableObject {
     }
 
     private nonisolated static func hasICloudEntitlements() -> Bool {
-        #if canImport(Security)
+        #if canImport(Security) && os(macOS)
         guard let task = SecTaskCreateFromSelf(nil) else { return false }
         let services = SecTaskCopyValueForEntitlement(
             task,
@@ -369,6 +369,14 @@ final class SeedPhraseService: ObservableObject {
             nil
         ) as? [Any]
         return (services?.isEmpty == false) && (containers?.isEmpty == false)
+        #elseif canImport(CloudKit)
+        // iOS SDKs used by this target do not expose SecTask entitlement APIs.
+        // Keep the check conservative: only treat iCloud backup as entitlement-ready
+        // when ubiquitous containers are configured in Info.plist.
+        if let containers = Bundle.main.object(forInfoDictionaryKey: "NSUbiquitousContainers") as? [String: Any] {
+            return !containers.isEmpty
+        }
+        return false
         #else
         return false
         #endif
