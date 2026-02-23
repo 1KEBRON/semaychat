@@ -8,6 +8,7 @@ private let seededStarterKey = "semay.offlineTiles.seededStarter"
 private let hubBaseURLKey = "semay.hub.base_url"
 private let hubIngestTokenKey = "semay.hub.ingest_token"
 private let requireSignedOfflinePacksKey = "semay.offline_maps.require_signed_packs"
+private let offlinePackInstallMetricsKey = "semay.offline_maps.install_metrics.v1"
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 private let bundledStarterTilesName = "semay-starter-asmara"
 private let bundledStarterTilesExtension = "mbtiles"
@@ -222,6 +223,35 @@ struct OfflineTilePackActivationStatus {
     var hasBlockingDependencies: Bool {
         !missingDependencies.isEmpty
     }
+}
+
+struct OfflineTilePackInstallMetricsSnapshot: Equatable {
+    let attempts: Int
+    let successes: Int
+    let failures: Int
+    let lastError: String?
+    let updatedAt: Int
+
+    var successRate: Double {
+        guard attempts > 0 else { return 0 }
+        return Double(successes) / Double(attempts)
+    }
+}
+
+private struct OfflineTilePackInstallMetricsState: Codable {
+    var attempts: Int
+    var successes: Int
+    var failures: Int
+    var lastError: String?
+    var updatedAt: Int
+
+    static let zero = OfflineTilePackInstallMetricsState(
+        attempts: 0,
+        successes: 0,
+        failures: 0,
+        lastError: nil,
+        updatedAt: 0
+    )
 }
 
 private struct LocalPackManifest: Codable {
@@ -524,6 +554,33 @@ final class OfflineTileStore: ObservableObject {
         )
     }
 
+    func installMetricsSnapshot() -> OfflineTilePackInstallMetricsSnapshot {
+        installMetricsSnapshot(from: loadInstallMetricsState())
+    }
+
+#if DEBUG
+    func debugResetInstallMetricsForTests() {
+        UserDefaults.standard.removeObject(forKey: offlinePackInstallMetricsKey)
+    }
+
+    func debugRecordInstallOutcomeForTests(
+        success: Bool,
+        errorMessage: String = "Synthetic install failure"
+    ) {
+        recordInstallAttempt()
+        if success {
+            recordInstallSuccess()
+        } else {
+            let error = NSError(
+                domain: "OfflineTileStoreTests",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: errorMessage]
+            )
+            recordInstallFailure(error)
+        }
+    }
+#endif
+
     @discardableResult
     func installHubPack(_ pack: HubTilePack) async throws -> OfflineTilePack {
         let result = try await installHubPackWithDependencies(pack)
@@ -535,66 +592,74 @@ final class OfflineTileStore: ObservableObject {
         _ pack: HubTilePack,
         catalog catalogOverride: [HubTilePack]? = nil
     ) async throws -> HubTilePackInstallResult {
-        let baseURL = try await resolveHubBaseURL()
-        let catalog: [HubTilePack]
-        if let catalogOverride {
-            catalog = catalogOverride
-        } else {
-            catalog = try await fetchHubCatalog()
-        }
-        let initiallyInstalled = discoverPacks()
-        let dependencyPlan = buildDependencyPlan(
-            for: pack,
-            catalog: catalog,
-            installedPacks: initiallyInstalled
-        )
-
-        if dependencyPlan.hasCycle {
-            throw NSError(
-                domain: "OfflineTileStore",
-                code: 42,
-                userInfo: [NSLocalizedDescriptionKey: "Dependency cycle detected for \(pack.name)."]
-            )
-        }
-        if !dependencyPlan.missingDependencies.isEmpty {
-            let missing = dependencyPlan.missingDependencies.sorted()
-            throw NSError(
-                domain: "OfflineTileStore",
-                code: 41,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "Missing required dependencies: \(missing.joined(separator: ", "))",
-                    "missing_dependencies": missing,
-                ]
-            )
-        }
-        try enforceSignedPolicyForHubInstallIfNeeded(
-            primary: pack,
-            dependencyPlan: dependencyPlan,
-            installedPacks: initiallyInstalled
-        )
-
-        var installedDependencyPacks: [OfflineTilePack] = []
-        var installedNow = initiallyInstalled
-        for dependency in dependencyPlan.dependenciesToInstall {
-            if installedPack(matching: dependency, in: installedNow) != nil {
-                continue
+        recordInstallAttempt()
+        do {
+            let baseURL = try await resolveHubBaseURL()
+            let catalog: [HubTilePack]
+            if let catalogOverride {
+                catalog = catalogOverride
+            } else {
+                catalog = try await fetchHubCatalog()
             }
-            let installed = try await downloadAndInstallHubPack(dependency, baseURL: baseURL)
-            installedDependencyPacks.append(installed)
-            installedNow.removeAll { $0.path == installed.path }
-            installedNow.append(installed)
+            let initiallyInstalled = discoverPacks()
+            let dependencyPlan = buildDependencyPlan(
+                for: pack,
+                catalog: catalog,
+                installedPacks: initiallyInstalled
+            )
+
+            if dependencyPlan.hasCycle {
+                throw NSError(
+                    domain: "OfflineTileStore",
+                    code: 42,
+                    userInfo: [NSLocalizedDescriptionKey: "Dependency cycle detected for \(pack.name)."]
+                )
+            }
+            if !dependencyPlan.missingDependencies.isEmpty {
+                let missing = dependencyPlan.missingDependencies.sorted()
+                throw NSError(
+                    domain: "OfflineTileStore",
+                    code: 41,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Missing required dependencies: \(missing.joined(separator: ", "))",
+                        "missing_dependencies": missing,
+                    ]
+                )
+            }
+            try enforceSignedPolicyForHubInstallIfNeeded(
+                primary: pack,
+                dependencyPlan: dependencyPlan,
+                installedPacks: initiallyInstalled
+            )
+
+            var installedDependencyPacks: [OfflineTilePack] = []
+            var installedNow = initiallyInstalled
+            for dependency in dependencyPlan.dependenciesToInstall {
+                if installedPack(matching: dependency, in: installedNow) != nil {
+                    continue
+                }
+                let installed = try await downloadAndInstallHubPack(dependency, baseURL: baseURL)
+                installedDependencyPacks.append(installed)
+                installedNow.removeAll { $0.path == installed.path }
+                installedNow.append(installed)
+            }
+
+            let installedPrimary = try await downloadAndInstallHubPack(pack, baseURL: baseURL)
+
+            refresh()
+            selectPack(installedPrimary)
+            let activePrimary = withLifecycle(installedPrimary, state: .active)
+            let result = HubTilePackInstallResult(
+                primary: activePrimary,
+                installedDependencies: installedDependencyPacks,
+                alreadySatisfiedDependencies: dependencyPlan.alreadySatisfiedDependencies.sorted()
+            )
+            recordInstallSuccess()
+            return result
+        } catch {
+            recordInstallFailure(error)
+            throw error
         }
-
-        let installedPrimary = try await downloadAndInstallHubPack(pack, baseURL: baseURL)
-
-        refresh()
-        selectPack(installedPrimary)
-        let activePrimary = withLifecycle(installedPrimary, state: .active)
-        return HubTilePackInstallResult(
-            primary: activePrimary,
-            installedDependencies: installedDependencyPacks,
-            alreadySatisfiedDependencies: dependencyPlan.alreadySatisfiedDependencies.sorted()
-        )
     }
 
     @discardableResult
@@ -1559,6 +1624,67 @@ final class OfflineTileStore: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "Signed-pack policy is enabled. Unsigned pack(s): \(names)."]
             )
         }
+    }
+
+    private func loadInstallMetricsState() -> OfflineTilePackInstallMetricsState {
+        guard let data = UserDefaults.standard.data(forKey: offlinePackInstallMetricsKey),
+              let decoded = try? JSONDecoder().decode(OfflineTilePackInstallMetricsState.self, from: data) else {
+            return .zero
+        }
+        return decoded
+    }
+
+    private func saveInstallMetricsState(_ state: OfflineTilePackInstallMetricsState) {
+        guard let encoded = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(encoded, forKey: offlinePackInstallMetricsKey)
+    }
+
+    private func installMetricsSnapshot(
+        from state: OfflineTilePackInstallMetricsState
+    ) -> OfflineTilePackInstallMetricsSnapshot {
+        OfflineTilePackInstallMetricsSnapshot(
+            attempts: state.attempts,
+            successes: state.successes,
+            failures: state.failures,
+            lastError: state.lastError,
+            updatedAt: state.updatedAt
+        )
+    }
+
+    private func recordInstallAttempt() {
+        var state = loadInstallMetricsState()
+        state.attempts += 1
+        state.updatedAt = Int(Date().timeIntervalSince1970)
+        saveInstallMetricsState(state)
+    }
+
+    private func recordInstallSuccess() {
+        var state = loadInstallMetricsState()
+        state.successes += 1
+        state.lastError = nil
+        state.updatedAt = Int(Date().timeIntervalSince1970)
+        saveInstallMetricsState(state)
+        logInstallMetricsSnapshot(installMetricsSnapshot(from: state), context: "success")
+    }
+
+    private func recordInstallFailure(_ error: Error) {
+        var state = loadInstallMetricsState()
+        state.failures += 1
+        state.lastError = (error as NSError).localizedDescription
+        state.updatedAt = Int(Date().timeIntervalSince1970)
+        saveInstallMetricsState(state)
+        logInstallMetricsSnapshot(installMetricsSnapshot(from: state), context: "failure")
+    }
+
+    private func logInstallMetricsSnapshot(
+        _ snapshot: OfflineTilePackInstallMetricsSnapshot,
+        context: String
+    ) {
+        let successPercent = String(format: "%.1f", snapshot.successRate * 100)
+        let lastError = snapshot.lastError ?? "-"
+        print(
+            "[OfflineTileStore] install_metrics context=\(context) attempts=\(snapshot.attempts) successes=\(snapshot.successes) failures=\(snapshot.failures) success_rate_percent=\(successPercent) last_error=\(lastError)"
+        )
     }
 
     private func normalizedOptional(_ value: String?) -> String? {

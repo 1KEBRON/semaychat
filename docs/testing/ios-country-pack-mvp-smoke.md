@@ -7,6 +7,7 @@ Run this before TestFlight/App Store submissions when map country-pack behavior 
 - Country-pack catalog selection and dependency planning.
 - Pack integrity checks (hash/signature policy paths).
 - Offline pack selector behavior.
+- Install success/failure metrics instrumentation (`install_metrics` log lines).
 - Personal-first contribution lifecycle and deterministic replay behavior.
 - TI/AM localization completeness for release-critical listing actions.
 
@@ -30,3 +31,10 @@ cd /Users/kebz/arki/semayhub/semaychat
 1. Re-run the failing suite directly from the generated log command context.
 2. If failure is simulator process instability, reboot the simulator and rerun.
 3. If failure is deterministic, block release until fixed and re-validated.
+
+## Install Metrics Logging
+- Each install attempt records persistent counters in `OfflineTileStore`.
+- Success/failure outcomes emit lines like:
+  `"[OfflineTileStore] install_metrics context=success ..."` or
+  `"[OfflineTileStore] install_metrics context=failure ..."`
+- Use these counters to compute install success rate across sessions.
