@@ -1,6 +1,6 @@
 # iOS Release Preflight (Local)
 
-Use this when GitHub Actions checks are unavailable or blocked.
+This is the default testing path for release validation.
 
 ## Run
 
