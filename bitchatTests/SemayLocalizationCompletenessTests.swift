@@ -20,6 +20,26 @@ struct SemayLocalizationCompletenessTests {
             "semay.onboarding.secure_backup",
             "semay.onboarding.write_seed_instructions",
             "semay.common.continue",
+            "semay.listing.action.endorse",
+            "semay.listing.action.report",
+            "semay.listing.action.keep_personal",
+            "semay.listing.action.share_network",
+            "semay.listing.action.retract",
+            "semay.listing.action.edit",
+            "semay.listing.share.personal_only",
+            "semay.listing.share.queued",
+            "semay.listing.share.published",
+            "semay.listing.share.rejected",
+            "semay.listing.message.queued_for_network",
+            "semay.listing.message.share_blocked_generic",
+            "semay.listing.message.personal_only",
+            "semay.listing.message.report_submitted",
+            "semay.listing.editor.title",
+            "semay.listing.editor.field.name",
+            "semay.listing.editor.field.category",
+            "semay.listing.editor.field.details",
+            "semay.listing.editor.field.phone",
+            "semay.listing.editor.field.website",
         ]
 
         for key in requiredKeys {
@@ -43,6 +63,14 @@ struct SemayLocalizationCompletenessTests {
             "semay.onboarding.start_using",
             "semay.onboarding.choose_backup",
             "semay.common.continue",
+            "semay.listing.action.endorse",
+            "semay.listing.action.share_network",
+            "semay.listing.action.keep_personal",
+            "semay.listing.share.personal_only",
+            "semay.listing.share.queued",
+            "semay.listing.share.published",
+            "semay.listing.share.rejected",
+            "semay.listing.editor.title",
         ]
 
         for key in strictKeys {

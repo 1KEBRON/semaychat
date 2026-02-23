@@ -37079,6 +37079,750 @@
           }
         }
       }
+    },
+    "semay.listing.action.endorse": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Endorse"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ደግፍ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ይደግፉ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.report": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሪፖርት"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሪፖርት አድርግ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.keep_personal": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Personal"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ብግሊ ሓዝ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "በግል አቆይ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.share_network": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share to Network"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ናብ ኔትወርክ ኣካፍል"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ወደ ኔትወርክ አጋራ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.retract": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retract"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሰርዝ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሰርዝ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.edit": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit Listing"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝር ኣርትዕ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝር አርትዕ"
+          }
+        }
+      }
+    },
+    "semay.listing.share.personal_only": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personal only"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ግላዊ ጥራይ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "የግል ብቻ"
+          }
+        }
+      }
+    },
+    "semay.listing.share.queued": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Queued for network"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ንኔትወርክ ተሰሪዑ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ለኔትወርክ ተዘጋጅቷል"
+          }
+        }
+      }
+    },
+    "semay.listing.share.published": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Published to network"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ኣብ ኔትወርክ ተለጢፉ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ወደ ኔትወርክ ታትሟል"
+          }
+        }
+      }
+    },
+    "semay.listing.share.rejected": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Network share blocked"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ምክፋል ኔትወርክ ተኸልኪሉ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "የኔትወርክ ማጋራት ታግዷል"
+          }
+        }
+      }
+    },
+    "semay.listing.message.queued_for_network": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listing queued for network sharing."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝሩ ንኔትወርክ ምክፋል ተሰሪዑ።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝሩ ለኔትወርክ ማጋራት ተዘጋጅቷል።"
+          }
+        }
+      }
+    },
+    "semay.listing.message.share_blocked_generic": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share request was blocked by quality checks."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሕቶ ምክፋል ብመርመራ ጥራይ ተኸልኪሉ።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "የማጋራት ጥያቄው በጥራት ማረጋገጫ ታግዷል።"
+          }
+        }
+      }
+    },
+    "semay.listing.message.personal_only": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listing is now personal-only."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝሩ ሕጂ ግላዊ ጥራይ እዩ።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝሩ አሁን የግል ብቻ ነው።"
+          }
+        }
+      }
+    },
+    "semay.listing.message.report_submitted": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Service report submitted."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሪፖርት ተላኢኹ።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሪፖርቱ ተልኳል።"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.title": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit Listing"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝር ኣርትዕ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝርዝር አርትዕ"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.field.phone": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone (Optional)"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ስልኪ (ኣማራጺ)"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ስልክ (አማራጭ)"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.field.website": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Website (Optional)"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዌብሳይት (ኣማራጺ)"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዌብሳይት (አማራጭ)"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.field.name": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listing Name"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ስም ዝርዝር"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "የዝርዝር ስም"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.field.category": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Category"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ምድብ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ምድብ"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.field.details": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Description"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "መግለጺ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "መግለጫ"
+          }
+        }
+      }
+    },
+    "semay.listing.message.endorsed": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Service endorsed."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ኣገልግሎት ተደጊፉ።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "አገልግሎቱ ተደግፏል።"
+          }
+        }
+      }
+    },
+    "semay.listing.message.endorse_failed": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save endorsement right now."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሕጂ ድጋፍ ምዝገባ ኣይተኻእለን።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "አሁን ድጋፉን ማስቀመጥ አልተቻለም።"
+          }
+        }
+      }
+    },
+    "semay.listing.message.retracted": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Service marked retracted."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ኣገልግሎት ከም ዝተሰረዘ ተምልኪቱ።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "አገልግሎቱ እንደተሰረዘ ተመዝግቧል።"
+          }
+        }
+      }
+    },
+    "semay.listing.message.share_blocked_prefix": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share request blocked"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሕቶ ምክፋል ተኸልኪሉ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "የማጋራት ጥያቄ ታግዷል"
+          }
+        }
+      }
+    },
+    "semay.listing.share.blocked_prefix": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share blocked"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ምክፋል ተኸልኪሉ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ማጋራት ታግዷል"
+          }
+        }
+      }
+    },
+    "semay.listing.action.close": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዕጸው"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ዝጋ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.cancel": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሰርዝ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ሰርዝ"
+          }
+        }
+      }
+    },
+    "semay.listing.action.save": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ኣቐምጥ"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "አስቀምጥ"
+          }
+        }
+      }
+    },
+    "semay.listing.menu.trust": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trust"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "እምነት"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "እምነት"
+          }
+        }
+      }
+    },
+    "semay.listing.menu.sharing": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sharing"
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ምክፋል"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ማጋራት"
+          }
+        }
+      }
+    },
+    "semay.listing.editor.error.required_name_category": {
+      "comment": "Semay listing localization key",
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Name and category are required."
+          }
+        },
+        "ti": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ስምን ምድብን ኣድላዪ እዮም።"
+          }
+        },
+        "am": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ስም እና ምድብ አስፈላጊ ናቸው።"
+          }
+        }
+      }
     }
   },
   "version": "1.1"
