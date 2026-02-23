@@ -650,6 +650,7 @@ private struct SemayMapTabView: View {
     @State private var editingPin: SemayMapPin?
     @State private var pinEditorCoordinate: CLLocationCoordinate2D?
     @State private var editingBusiness: BusinessProfile?
+    @State private var editingService: SemayServiceDirectoryEntry?
     @State private var promisePayBusiness: BusinessProfile?
     @State private var useOSMBaseMap = false
     @State private var useOfflineTiles = false
@@ -773,6 +774,13 @@ private struct SemayMapTabView: View {
         view = AnyView(
             view.sheet(item: $editingBusiness) { business in
                 BusinessEditorSheet(existingBusiness: business)
+                    .environmentObject(dataStore)
+            }
+        )
+
+        view = AnyView(
+            view.sheet(item: $editingService) { service in
+                SemayServiceEditorSheet(existingService: service)
                     .environmentObject(dataStore)
             }
         )
@@ -1570,11 +1578,14 @@ private struct SemayMapTabView: View {
                 .font(.caption)
             Text(shareStatusText(for: selected))
                 .font(.caption2)
-                .foregroundStyle(selected.shareScope == .network ? .blue : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(shareStatusTint(for: selected).opacity(0.18), in: Capsule())
+                .foregroundStyle(shareStatusTint(for: selected))
             if selected.publishState == .rejected {
                 let reasons = qualityReasonList(from: selected.qualityReasonsJSON).map(qualityReasonLabel)
                 if !reasons.isEmpty {
-                    Text("Share blocked: \(reasons.joined(separator: ", "))")
+                    Text("\(listingString("semay.listing.share.blocked_prefix", "Share blocked")): \(reasons.joined(separator: ", "))")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .lineLimit(2)
@@ -1610,36 +1621,40 @@ private struct SemayMapTabView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(selected.latitude == 0 && selected.longitude == 0)
-                Menu("Trust") {
-                    Button("Endorse") {
+                Menu(listingString("semay.listing.menu.trust", "Trust")) {
+                    Button(listingString("semay.listing.action.endorse", "Endorse")) {
                         let trusted = dataStore.endorseServiceDirectoryEntry(serviceID: selected.serviceID, score: 1, reason: "verified")
                         mapActionMessage = trusted
-                            ? "Service endorsed."
-                            : "Could not save endorsement right now."
+                            ? listingString("semay.listing.message.endorsed", "Service endorsed.")
+                            : listingString("semay.listing.message.endorse_failed", "Could not save endorsement right now.")
                     }
-                    Button("Report", role: .destructive) {
+                    Button(listingString("semay.listing.action.report", "Report"), role: .destructive) {
                         dataStore.reportServiceDirectoryEntry(serviceID: selected.serviceID, reason: "mismatch")
-                        mapActionMessage = "Service report submitted."
+                        mapActionMessage = listingString("semay.listing.message.report_submitted", "Service report submitted.")
                     }
                     if dataStore.currentUserPubkey() == selected.authorPubkey.lowercased() {
-                        Button("Retract", role: .destructive) {
+                        Button(listingString("semay.listing.action.retract", "Retract"), role: .destructive) {
                             dataStore.retractServiceDirectoryEntry(serviceID: selected.serviceID)
                             navigation.selectedServiceID = nil
-                            mapActionMessage = "Service marked retracted."
+                            mapActionMessage = listingString("semay.listing.message.retracted", "Service marked retracted.")
                         }
                     }
                 }
                 if dataStore.currentUserPubkey() == selected.authorPubkey.lowercased() {
-                    Menu("Sharing") {
-                        Button("Keep Personal") {
+                    Button(listingString("semay.listing.action.edit", "Edit Listing")) {
+                        editingService = selected
+                    }
+                    .buttonStyle(.bordered)
+                    Menu(listingString("semay.listing.menu.sharing", "Sharing")) {
+                        Button(listingString("semay.listing.action.keep_personal", "Keep Personal")) {
                             keepPersonalOnly(for: selected)
                         }
-                        Button("Share to Network") {
+                        Button(listingString("semay.listing.action.share_network", "Share to Network")) {
                             requestNetworkShare(for: selected)
                         }
                     }
                 }
-                Button("Close") {
+                Button(listingString("semay.listing.action.close", "Close")) {
                     navigation.selectedServiceID = nil
                 }
                 .buttonStyle(.bordered)
@@ -2162,31 +2177,51 @@ private struct SemayMapTabView: View {
     private func requestNetworkShare(for service: SemayServiceDirectoryEntry) {
         let result = dataStore.requestNetworkShareForService(serviceID: service.serviceID)
         if result.accepted {
-            mapActionMessage = "Listing queued for network sharing."
+            mapActionMessage = listingString(
+                "semay.listing.message.queued_for_network",
+                "Listing queued for network sharing."
+            )
             return
         }
         if result.reasons.isEmpty {
-            mapActionMessage = "Share request was blocked by quality checks."
+            mapActionMessage = listingString(
+                "semay.listing.message.share_blocked_generic",
+                "Share request was blocked by quality checks."
+            )
             return
         }
-        mapActionMessage = "Share request blocked: \(result.reasons.joined(separator: ", "))."
+        let reasons = result.reasons.map(qualityReasonLabel).joined(separator: ", ")
+        mapActionMessage = "\(listingString("semay.listing.message.share_blocked_prefix", "Share request blocked")): \(reasons)."
     }
 
     private func keepPersonalOnly(for service: SemayServiceDirectoryEntry) {
         dataStore.setServiceContributionScope(serviceID: service.serviceID, scope: .personal)
-        mapActionMessage = "Listing is now personal-only."
+        mapActionMessage = listingString("semay.listing.message.personal_only", "Listing is now personal-only.")
     }
 
     private func shareStatusText(for service: SemayServiceDirectoryEntry) -> String {
         switch service.publishState {
         case .localOnly:
-            return "Personal only"
+            return listingString("semay.listing.share.personal_only", "Personal only")
         case .pendingReview:
-            return "Queued for network"
+            return listingString("semay.listing.share.queued", "Queued for network")
         case .published:
-            return "Published to network"
+            return listingString("semay.listing.share.published", "Published to network")
         case .rejected:
-            return "Network share blocked"
+            return listingString("semay.listing.share.rejected", "Network share blocked")
+        }
+    }
+
+    private func shareStatusTint(for service: SemayServiceDirectoryEntry) -> Color {
+        switch service.publishState {
+        case .localOnly:
+            return .secondary
+        case .pendingReview:
+            return .blue
+        case .published:
+            return .green
+        case .rejected:
+            return .orange
         }
     }
 
@@ -2199,7 +2234,32 @@ private struct SemayMapTabView: View {
     }
 
     private func qualityReasonLabel(_ key: String) -> String {
-        key.replacingOccurrences(of: "_", with: " ")
+        switch key {
+        case "missing_required_fields":
+            return listingString("semay.listing.reason.missing_required_fields", "missing required fields")
+        case "invalid_coordinates":
+            return listingString("semay.listing.reason.invalid_coordinates", "invalid coordinates")
+        case "possible_duplicate":
+            return listingString("semay.listing.reason.possible_duplicate", "possible duplicate listing")
+        case "photo_limit_exceeded":
+            return listingString("semay.listing.reason.photo_limit_exceeded", "photo limit exceeded")
+        case "photo_resolution_low":
+            return listingString("semay.listing.reason.photo_resolution_low", "photo resolution too low")
+        case "photo_byte_cap_exceeded":
+            return listingString("semay.listing.reason.photo_byte_cap_exceeded", "photo size too large")
+        case "photo_duplicate_hash":
+            return listingString("semay.listing.reason.photo_duplicate_hash", "duplicate photo detected")
+        case "author_trust_low":
+            return listingString("semay.listing.reason.author_trust_low", "author trust is too low")
+        case "author_rate_limited":
+            return listingString("semay.listing.reason.author_rate_limited", "author is temporarily rate limited")
+        default:
+            return key.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+
+    private func listingString(_ key: String, _ fallback: String) -> String {
+        NSLocalizedString(key, tableName: nil, bundle: .main, value: fallback, comment: "")
     }
 }
 
@@ -4657,6 +4717,12 @@ private struct SemayExploreSheet: View {
                             Text(service.trustBadge)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                            Text(shareStatusText(for: service))
+                                .font(.caption2)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(shareStatusTint(for: service).opacity(0.18), in: Capsule())
+                                .foregroundStyle(shareStatusTint(for: service))
                             if !service.details.isEmpty {
                                 Text(service.details)
                                     .font(.caption2)
@@ -4666,37 +4732,44 @@ private struct SemayExploreSheet: View {
                         }
                     }
                     .contextMenu {
-                        Button("Endorse") {
+                        Button(listingString("semay.listing.action.endorse", "Endorse")) {
                             let trusted = dataStore.endorseServiceDirectoryEntry(serviceID: service.serviceID, score: 1, reason: "verified")
                             exploreActionMessage = trusted
-                                ? "Service endorsed."
-                                : "Could not save endorsement right now."
+                                ? listingString("semay.listing.message.endorsed", "Service endorsed.")
+                                : listingString("semay.listing.message.endorse_failed", "Could not save endorsement right now.")
                         }
                         if dataStore.currentUserPubkey() == service.authorPubkey.lowercased() {
-                            Button("Keep Personal") {
+                            Button(listingString("semay.listing.action.keep_personal", "Keep Personal")) {
                                 dataStore.setServiceContributionScope(serviceID: service.serviceID, scope: .personal)
-                                exploreActionMessage = "Listing is now personal-only."
+                                exploreActionMessage = listingString("semay.listing.message.personal_only", "Listing is now personal-only.")
                             }
-                            Button("Share to Network") {
+                            Button(listingString("semay.listing.action.share_network", "Share to Network")) {
                                 let result = dataStore.requestNetworkShareForService(serviceID: service.serviceID)
                                 if result.accepted {
-                                    exploreActionMessage = "Listing queued for network sharing."
+                                    exploreActionMessage = listingString(
+                                        "semay.listing.message.queued_for_network",
+                                        "Listing queued for network sharing."
+                                    )
                                 } else if result.reasons.isEmpty {
-                                    exploreActionMessage = "Share request was blocked by quality checks."
+                                    exploreActionMessage = listingString(
+                                        "semay.listing.message.share_blocked_generic",
+                                        "Share request was blocked by quality checks."
+                                    )
                                 } else {
-                                    exploreActionMessage = "Share request blocked: \(result.reasons.joined(separator: ", "))."
+                                    let reasons = result.reasons.map(qualityReasonLabel).joined(separator: ", ")
+                                    exploreActionMessage = "\(listingString("semay.listing.message.share_blocked_prefix", "Share request blocked")): \(reasons)."
                                 }
                             }
                         }
-                        Button("Report", role: .destructive) {
+                        Button(listingString("semay.listing.action.report", "Report"), role: .destructive) {
                             dataStore.reportServiceDirectoryEntry(serviceID: service.serviceID, reason: "mismatch")
-                            exploreActionMessage = "Service report submitted."
+                            exploreActionMessage = listingString("semay.listing.message.report_submitted", "Service report submitted.")
                         }
                         if dataStore.currentUserPubkey() == service.authorPubkey.lowercased() {
-                            Button("Retract", role: .destructive) {
+                            Button(listingString("semay.listing.action.retract", "Retract"), role: .destructive) {
                                 dataStore.retractServiceDirectoryEntry(serviceID: service.serviceID)
                                 selectedServiceID = nil
-                                exploreActionMessage = "Service marked retracted."
+                                exploreActionMessage = listingString("semay.listing.message.retracted", "Service marked retracted.")
                             }
                         }
                     }
@@ -4938,6 +5011,61 @@ private struct SemayExploreSheet: View {
             }
         } header: {
             Text("Library")
+        }
+    }
+
+    private func listingString(_ key: String, _ fallback: String) -> String {
+        NSLocalizedString(key, tableName: nil, bundle: .main, value: fallback, comment: "")
+    }
+
+    private func shareStatusText(for service: SemayServiceDirectoryEntry) -> String {
+        switch service.publishState {
+        case .localOnly:
+            return listingString("semay.listing.share.personal_only", "Personal only")
+        case .pendingReview:
+            return listingString("semay.listing.share.queued", "Queued for network")
+        case .published:
+            return listingString("semay.listing.share.published", "Published to network")
+        case .rejected:
+            return listingString("semay.listing.share.rejected", "Network share blocked")
+        }
+    }
+
+    private func shareStatusTint(for service: SemayServiceDirectoryEntry) -> Color {
+        switch service.publishState {
+        case .localOnly:
+            return .secondary
+        case .pendingReview:
+            return .blue
+        case .published:
+            return .green
+        case .rejected:
+            return .orange
+        }
+    }
+
+    private func qualityReasonLabel(_ key: String) -> String {
+        switch key {
+        case "missing_required_fields":
+            return listingString("semay.listing.reason.missing_required_fields", "missing required fields")
+        case "invalid_coordinates":
+            return listingString("semay.listing.reason.invalid_coordinates", "invalid coordinates")
+        case "possible_duplicate":
+            return listingString("semay.listing.reason.possible_duplicate", "possible duplicate listing")
+        case "photo_limit_exceeded":
+            return listingString("semay.listing.reason.photo_limit_exceeded", "photo limit exceeded")
+        case "photo_resolution_low":
+            return listingString("semay.listing.reason.photo_resolution_low", "photo resolution too low")
+        case "photo_byte_cap_exceeded":
+            return listingString("semay.listing.reason.photo_byte_cap_exceeded", "photo size too large")
+        case "photo_duplicate_hash":
+            return listingString("semay.listing.reason.photo_duplicate_hash", "duplicate photo detected")
+        case "author_trust_low":
+            return listingString("semay.listing.reason.author_trust_low", "author trust is too low")
+        case "author_rate_limited":
+            return listingString("semay.listing.reason.author_rate_limited", "author is temporarily rate limited")
+        default:
+            return key.replacingOccurrences(of: "_", with: " ")
         }
     }
 
@@ -5254,6 +5382,83 @@ private struct AddPinSheet: View {
                 }
             }
         }
+    }
+}
+
+private struct SemayServiceEditorSheet: View {
+    @EnvironmentObject private var dataStore: SemayDataStore
+    @Environment(\.dismiss) private var dismiss
+    let existingService: SemayServiceDirectoryEntry
+
+    @State private var name = ""
+    @State private var category = ""
+    @State private var details = ""
+    @State private var phone = ""
+    @State private var website = ""
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField(listingString("semay.listing.editor.field.name", "Listing Name"), text: $name)
+                TextField(listingString("semay.listing.editor.field.category", "Category"), text: $category)
+                TextField(listingString("semay.listing.editor.field.details", "Description"), text: $details, axis: .vertical)
+                    .lineLimit(3...6)
+                TextField(listingString("semay.listing.editor.field.phone", "Phone (Optional)"), text: $phone)
+                    .semayPhoneKeyboard()
+                TextField(listingString("semay.listing.editor.field.website", "Website (Optional)"), text: $website)
+                    .semayDisableAutoCaps()
+                    .semayDisableAutocorrection()
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+
+                if let error {
+                    Text(error)
+                        .foregroundStyle(.red)
+                }
+            }
+            .navigationTitle(listingString("semay.listing.editor.title", "Edit Listing"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(listingString("semay.listing.action.cancel", "Cancel")) {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(listingString("semay.listing.action.save", "Save")) {
+                        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedCategory = category.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmedName.isEmpty || trimmedCategory.isEmpty {
+                            error = listingString(
+                                "semay.listing.editor.error.required_name_category",
+                                "Name and category are required."
+                            )
+                            return
+                        }
+
+                        var updated = existingService
+                        updated.name = trimmedName
+                        updated.category = trimmedCategory
+                        updated.details = details.trimmingCharacters(in: .whitespacesAndNewlines)
+                        updated.phone = phone.trimmingCharacters(in: .whitespacesAndNewlines)
+                        updated.website = website.trimmingCharacters(in: .whitespacesAndNewlines)
+                        dataStore.updateServiceDirectoryEntry(updated)
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                name = existingService.name
+                category = existingService.category
+                details = existingService.details
+                phone = existingService.phone
+                website = existingService.website
+            }
+        }
+    }
+
+    private func listingString(_ key: String, _ fallback: String) -> String {
+        NSLocalizedString(key, tableName: nil, bundle: .main, value: fallback, comment: "")
     }
 }
 

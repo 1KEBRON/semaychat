@@ -1865,7 +1865,7 @@ final class SemayDataStore: ObservableObject {
                 adminArea: display.adminArea,
                 countryCode: display.countryCode,
                 phone: business.phone,
-                website: "",
+                website: linkedService.website,
                 emergencyContact: "",
                 urgency: SemayServiceUrgency.medium.rawValue,
                 verified: linkedService.verified,
